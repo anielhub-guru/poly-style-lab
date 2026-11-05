@@ -16,6 +16,8 @@ const nestedIds = {
 
 let state = copy(PRESETS['stormbound-shonen']);
 let analysisResult = null;
+let dirty = false, presetId = 'stormbound-shonen';
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 function init() {
   document.querySelector('[data-section="visual"]').before(document.querySelector('[data-section="reference"]'));
@@ -29,7 +31,11 @@ function init() {
     el.addEventListener('input', () => { state[id] = el.type === 'number' || el.type === 'range' ? Number(el.value) : el.value; if (id === 'name') state.slug = slugify(el.value); render(); });
   });
   Object.entries(nestedIds).forEach(([id, path]) => $(`#${id}`).addEventListener('input', event => { state[path[0]][path[1]] = event.target.type === 'number' ? Number(event.target.value) : event.target.value; render(); }));
-  $('#preset').addEventListener('change', event => { state = copy(PRESETS[event.target.value]); hydrate(); toast('Starting system loaded'); });
+  $('.workspace').addEventListener('input', () => { dirty = true; });
+  $('#preset').addEventListener('change', event => {
+    if (dirty && !confirm('Replace your edits with this starting system?')) { event.target.value = presetId; return; }
+    presetId = event.target.value; state = copy(PRESETS[presetId]); dirty = false; hydrate(); toast('Starting system loaded');
+  });
   $('#startAnalysis').addEventListener('click', runStudy);
   $('#palette').addEventListener('input', event => { const card = event.target.closest('[data-palette]'); if (!card) return; const index = Number(card.dataset.palette), field = event.target.dataset.field; state.palette[index][field] = field === 'share' ? Number(event.target.value) : event.target.value; render(); });
   $('#shots').addEventListener('input', event => updateShot(event));
@@ -46,10 +52,10 @@ function init() {
     if (analysisResult) return download(`${slugify(state.name)}.motion-style-blueprint.json`, await (await fetch(`${analysisResult.workspaceUrl}motion-style-blueprint.json`)).text(), 'application/json');
     toast('Run a measured channel study first');
   });
-  $('#exportPack').addEventListener('click', () => download('pack.json', JSON.stringify(toPolyStudioPack(normalizeBlueprint(state)), null, 2), 'application/json'));
+  $('#exportPack').addEventListener('click', exportPack);
   $('#exportGuide').addEventListener('click', () => download('style-guide.md', styleGuideMarkdown(normalizeBlueprint(state)), 'text/markdown'));
   $('#exportSheet').addEventListener('click', () => download(`${slugify(state.name)}.reference-sheet.svg`, referenceSheetSvg(normalizeBlueprint(state)), 'image/svg+xml'));
-  $('#exportPackInline').addEventListener('click', () => download('pack.json', JSON.stringify(toPolyStudioPack(normalizeBlueprint(state)), null, 2), 'application/json'));
+  $('#exportPackInline').addEventListener('click', exportPack);
   $('#copyCodex').addEventListener('click', () => copyText($('#codexCommand').textContent, 'Codex handoff copied'));
   $('#copyCli').addEventListener('click', () => copyText($('#cliCommand').textContent, 'CLI command copied'));
   const observer = new IntersectionObserver(entries => entries.forEach(entry => { if (!entry.isIntersecting) return; $$('#sectionNav button').forEach(button => button.classList.toggle('active', button.dataset.target === entry.target.dataset.section)); }), { rootMargin: '-25% 0px -65%' });
@@ -75,7 +81,7 @@ function renderReference() {
 
 function renderPalette() {
   $('#palette').innerHTML = state.palette.map((swatch, index) => `<div class="swatch" data-palette="${index}"><input class="swatch-color" data-field="value" type="color" value="${swatch.value}" aria-label="${swatch.role} colour"><div class="swatch-fields"><input data-field="role" value="${escapeAttr(swatch.role)}" aria-label="Palette role"><input data-field="share" type="number" min="0" max="100" value="${swatch.share}" aria-label="Palette share"></div></div>`).join('');
-  const total = state.palette.reduce((sum, item) => sum + Number(item.share), 0); $('#paletteTotal').textContent = `${total}% entered`;
+  const total = state.palette.reduce((sum, item) => sum + Number(item.share), 0); $('#paletteTotal').textContent = total === 100 ? '100%' : `${total}% entered · scaled to 100% on export`;
 }
 
 function renderShots() {
@@ -102,7 +108,7 @@ function renderPreview() {
   const referenceData = analysisResult?.evidenceUrl || blueprint.reference?.source?.dataUrl;
   $('#referenceThumbWrap').hidden = !referenceData; if (referenceData) $('#referenceThumb').src = referenceData;
   const valid = Boolean(analysisResult) && blueprint.shotGrammar.length > 0 && blueprint.continuityLocks.length > 0 && blueprint.negativeConstraints.length > 0 && blueprint.metadata.intent.length > 10;
-  $('#validation').classList.toggle('invalid', !valid); $('#validation').innerHTML = valid ? '<span>✓</span><p><b>Measured blueprint ready</b><br>30 FPS evidence is available for PolyStudio.</p>' : '<span>!</span><p><b>Study not measured</b><br>Add a channel and run the 10–20 video analysis.</p>';
+  $('#validation').classList.toggle('invalid', !valid); $('#validation').innerHTML = valid ? '<span>✓</span><p><b>Measured blueprint ready</b><br>30 FPS evidence is available for PolyStudio.</p>' : '<span>!</span><p><b>Study not measured</b><br>Add a channel and run the 10–20 Shorts analysis.</p>';
   $('#completion').textContent = valid ? 'Measured blueprint ready' : 'Channel study required';
   document.documentElement.style.setProperty('--orange', blueprint.palette.find(item => item.role === 'hero')?.value || blueprint.palette[1]?.value || '#eb6a32');
 }
@@ -126,31 +132,41 @@ function handleListClick(event) {
   state[remove.dataset.removeList].splice(Number(remove.dataset.index), 1); render();
 }
 
+async function exportPack() {
+  // after a measured study the pack carries the measured motion rules; before it, the authored visual style
+  if (analysisResult) return download('pack.json', await (await fetch(`${analysisResult.workspaceUrl}pack/pack.json`)).text(), 'application/json');
+  download('pack.json', JSON.stringify(toPolyStudioPack(normalizeBlueprint(state)), null, 2), 'application/json');
+}
 function openPrompt() { $('#promptDialog').showModal(); }
 async function runStudy() {
   const source = $('#sourceInput').value.trim();
-  if (!source) return toast('Add a YouTube channel, playlist, video, or local folder');
+  if (!source) return toast('Add a YouTube channel, shorts URL, video, or local folder');
   const button = $('#startAnalysis');
-  button.disabled = true; button.textContent = 'Measuring at 30 FPS…';
-  $('#analysisState').textContent = 'ANALYSIS RUNNING'; $('#analysisProgress').classList.add('running');
-  $('#analysisBar').style.width = '42%';
-  $('#analysisDetail').textContent = 'Downloading the selected set, normalizing every video to CFR 30, then tracking pose, face, hands, holds and snaps.';
+  button.disabled = true; button.textContent = 'Measuring…';
+  const setProgress = (label, percent, detail) => { $('#analysisState').textContent = label; $('#analysisBar').style.width = `${percent}%`; $('#analysisDetail').textContent = detail; };
+  $('#analysisProgress').classList.add('running'); setProgress('STARTING', 4, 'Checking tools and listing videos…');
   try {
-    const response = await fetch('/api/analyze', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source, videoCount: Number($('#videoCount').value), studyId: `${slugify(state.name)}-${Date.now()}` }) });
-    const result = await response.json();
-    if (!response.ok) throw new Error(result.error || 'Analysis failed');
-    analysisResult = result;
-    $('#analysisState').textContent = 'MEASURED BLUEPRINT READY'; $('#analysisBar').style.width = '100%';
-    $('#analysisDetail').textContent = `${result.videosAnalysed} videos analysed at ${result.analysisFps} FPS · mean pose coverage ${Math.round(result.confidence.meanPoseTrackedFrameRatio * 100)}%.`;
+    const start = await fetch('/api/analyze', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source, videoCount: Number($('#videoCount').value) || 12, name: state.name }) });
+    const started = await start.json();
+    if (!start.ok) throw new Error(started.error || 'Could not start the study');
+    let status, failures = 0;
+    do {
+      await sleep(1500);
+      try { status = await (await fetch(`/api/analyze/${started.studyId}`)).json(); failures = 0; } catch (error) { if (++failures > 4) throw error; continue; }
+      if (status.state === 'running') setProgress('ANALYSIS RUNNING', status.total ? Math.max(6, Math.round(status.done / status.total * 100)) : 6, status.message || 'Working…');
+    } while (!status || status.state === 'running');
+    if (status.state !== 'done') throw new Error(status.error || 'Analysis failed');
+    const result = analysisResult = { ...status.result, workspaceUrl: status.workspaceUrl, evidenceUrl: status.evidenceUrl };
+    const skipped = result.skipped?.length ? ` · ${result.skipped.length} skipped` : '';
+    setProgress('MEASURED BLUEPRINT READY', 100, `${result.videosAnalysed} videos analysed${skipped}. ${result.headline.slice(0, 2).join(' ')}${result.warnings?.length ? ` ⚠ ${result.warnings[0]}` : ''}`);
     if (result.evidenceUrl) {
       $('#evidenceView').hidden = false; $('#evidenceImage').src = result.evidenceUrl;
       $('#evidenceTitle').textContent = result.evidence?.source?.title || 'Representative analysed frame';
       $('#evidenceTime').textContent = `${result.evidenceFrame.timeSec.toFixed(2)}s · frame ${result.evidenceFrame.frame}`;
-      $('#referenceThumbWrap').hidden = false; $('#referenceThumb').src = result.evidenceUrl;
     }
     renderPreview(); toast('Measured motion blueprint ready');
   } catch (error) {
-    $('#analysisState').textContent = 'ANALYSIS FAILED'; $('#analysisDetail').textContent = error.message; $('#analysisBar').style.width = '0%';
+    setProgress('ANALYSIS FAILED', 0, error.message);
   } finally { button.disabled = false; button.textContent = 'Start measured study'; $('#analysisProgress').classList.remove('running'); }
 }
 async function copyPrompt() { await navigator.clipboard.writeText(`${normalizeBlueprint(state).promptContract.master}\n\nAVOID: ${normalizeBlueprint(state).promptContract.negative}`); toast('Master prompt copied'); }

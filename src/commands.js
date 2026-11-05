@@ -1,10 +1,8 @@
-import { copyFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { PRESETS, normalizeBlueprint, referenceSheetSvg, styleGuideMarkdown, toPolyStudioPack } from './blueprint.js';
-import { catalogSource } from './source-catalog.js';
-import { ingestCatalog, normalizeVideo } from './video-ingest.js';
-import { aggregateMeasurements, analyseVideo, writeStudy } from './style-analysis.js';
+import { runStudy, studyStatus } from './study.js';
 
 const imageTypes = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif', '.svg': 'image/svg+xml' };
 const required = (value, name) => { if (!value || typeof value !== 'string') throw new Error(`${name} is required`); return value; };
@@ -13,7 +11,8 @@ const writeJson = async (file, value) => { const target = resolve(file); await m
 const inspect = blueprint => ({ schema: blueprint.schema, name: blueprint.metadata.name, slug: blueprint.metadata.slug, reference: blueprint.reference ? { name: blueprint.reference.name, observations: blueprint.reference.observations.length, source: blueprint.reference.source.path || 'embedded' } : null, shots: blueprint.shotGrammar.length, continuityLocks: blueprint.continuityLocks.length, exclusions: blueprint.negativeConstraints.length, canvas: blueprint.canvas, camera: blueprint.camera });
 
 export const TOOL_DEFINITIONS = [
-  { name: 'style_analyze_channel', description: 'Download 10–20 videos from a YouTube channel or playlist, analyse every frame on a normalized 30 FPS clock, and create a measured PolyStudio motion-style blueprint.', inputSchema: { type: 'object', required: ['source', 'outputDir'], properties: { source: { type: 'string', description: 'YouTube channel, playlist, video URL, local video, or local folder.' }, outputDir: { type: 'string' }, videoCount: { type: 'integer', minimum: 10, maximum: 20, default: 15 } }, additionalProperties: false } },
+  { name: 'style_analyze_channel', description: 'Measure the motion style of 10–20 YouTube Shorts (a channel/shorts URL or playlist), or one short video or local folder. Downloads only the first ~45s of each at 480p, measures native-rate animation cadence, cuts and pose motion, and writes a compact summary, motion-style blueprint and a ready PolyStudio pack. Use background:true for long runs and poll style_analysis_status.', inputSchema: { type: 'object', required: ['source', 'outputDir'], properties: { source: { type: 'string', description: 'YouTube channel (its Shorts are used), shorts/playlist URL, single video URL, local video file, or local folder.' }, outputDir: { type: 'string' }, videoCount: { type: 'integer', minimum: 1, maximum: 20, default: 12, description: '10–20 recommended for a reliable style.' }, maxSecondsPerVideo: { type: 'integer', minimum: 10, maximum: 180, default: 45 }, name: { type: 'string', description: 'Name for the exported pack.' }, background: { type: 'boolean', default: false }, keepSources: { type: 'boolean', default: false, description: 'Keep downloaded videos (deleted by default).' } }, additionalProperties: false } },
+  { name: 'style_analysis_status', description: 'Progress (and the compact result when finished) of a style_analyze_channel study.', inputSchema: { type: 'object', required: ['outputDir'], properties: { outputDir: { type: 'string' } }, additionalProperties: false }, readOnlyHint: true },
   { name: 'style_list_presets', description: 'List built-in style systems available as measured starting points.', inputSchema: { type: 'object', properties: {}, additionalProperties: false }, readOnlyHint: true },
   { name: 'style_create', description: 'Create a normalized Localy style blueprint JSON file from a preset.', inputSchema: { type: 'object', required: ['output'], properties: { output: { type: 'string' }, preset: { type: 'string' }, name: { type: 'string' }, intent: { type: 'string' } }, additionalProperties: false } },
   { name: 'style_inspect', description: 'Return a compact machine-readable summary of a blueprint.', inputSchema: { type: 'object', required: ['blueprint'], properties: { blueprint: { type: 'string' } }, additionalProperties: false }, readOnlyHint: true },
@@ -25,23 +24,8 @@ export const TOOL_DEFINITIONS = [
 ];
 
 export async function runCommand(name, input = {}) {
-  if (name === 'style_analyze_channel') {
-    const source = required(input.source, 'source');
-    const workspace = resolve(required(input.outputDir, 'outputDir'));
-    await mkdir(workspace, { recursive: true });
-    const progress = [];
-    const onProgress = event => progress.push({ ...event, at: new Date().toISOString() });
-    const catalog = await catalogSource(source, input.videoCount || 15);
-    const ingested = await ingestCatalog(catalog, workspace, onProgress);
-    const measurements = [];
-    for (const item of ingested) {
-      const normalized = await normalizeVideo(item, workspace, onProgress);
-      measurements.push(await analyseVideo(normalized, workspace, onProgress));
-    }
-    const blueprint = aggregateMeasurements(measurements, catalog);
-    const output = await writeStudy(workspace, blueprint);
-    return { output, workspace, analysisFps: 30, videosAnalysed: measurements.length, evidence: blueprint.evidence[0] || null, evidenceFrame: blueprint.evidence[0]?.representativeFrame || null, confidence: blueprint.confidence, progress };
-  }
+  if (name === 'style_analyze_channel') return runStudy(input);
+  if (name === 'style_analysis_status') return studyStatus(required(input.outputDir, 'outputDir'));
   if (name === 'style_list_presets') return Object.entries(PRESETS).map(([id, preset]) => ({ id, name: preset.name, intent: preset.intent, shots: preset.shotGrammar.length }));
   if (name === 'style_create') {
     const presetId = input.preset || 'stormbound-shonen', preset = PRESETS[presetId];
@@ -68,6 +52,7 @@ export async function runCommand(name, input = {}) {
     if (!mimeType) throw new Error('Reference must be PNG, JPEG, WebP, GIF or SVG.');
     const bytes = await readFile(imagePath), targetDir = join(dirname(blueprintPath), 'reference');
     await mkdir(targetDir, { recursive: true });
+    for (const other of Object.keys(imageTypes)) if (other !== extension) await rm(join(targetDir, `primary${other}`), { force: true });
     const target = join(targetDir, `primary${extension}`); await copyFile(imagePath, target);
     blueprint.reference = { name: input.name || basename(imagePath), purpose: input.purpose || 'Primary visual reference for style, composition and finish.', observations: Array.isArray(input.observations) ? input.observations.map(String).filter(Boolean).slice(0, 24) : [], source: { path: relative(dirname(blueprintPath), target), mimeType, sha256: createHash('sha256').update(bytes).digest('hex'), sizeBytes: bytes.length } };
     await writeJson(blueprintPath, blueprint);

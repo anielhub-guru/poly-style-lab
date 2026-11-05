@@ -94,35 +94,70 @@ export const PRESETS = {
 };
 
 const copy = value => JSON.parse(JSON.stringify(value));
-const number = (value, fallback, min, max) => Math.min(max, Math.max(min, Number(value) || fallback));
+const number = (value, fallback, min, max) => {
+  const parsed = value === null || value === undefined || value === '' ? NaN : Number(value);
+  return Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : fallback;
+};
 const text = (value, fallback = '') => String(value || fallback).trim();
 const list = value => Array.isArray(value) ? value.map(item => text(item)).filter(Boolean) : [];
 
+const defined = object => Object.fromEntries(Object.entries(object).filter(([, value]) => value !== undefined));
+
+/** Turn a saved (already normalized) blueprint back into the flat authoring shape. */
+function flatten(blueprint) {
+  const { metadata = {}, canvas = {}, rendering = {}, lighting = {}, camera = {} } = blueprint;
+  return defined({
+    name: metadata.name, slug: metadata.slug, intent: metadata.intent, reference: blueprint.reference,
+    aspectRatio: canvas.aspectRatio, frameRate: canvas.frameRate, animationStep: canvas.animationStep,
+    medium: rendering.medium, lineWeight: rendering.lineWeightPxAt1080p, lineVariation: rendering.lineVariationPercent,
+    texture: rendering.texturePercent, saturation: rendering.saturationPercent, contrast: rendering.contrastPercent,
+    palette: blueprint.palette,
+    keyAngle: lighting.keyAngleDeg, keySoftness: lighting.keySoftnessPercent, fillRatio: lighting.fillToKeyRatio, rimIntensity: lighting.rimIntensityPercent,
+    focalLength: camera.defaultLensMm, shutterAngle: camera.shutterAngleDeg, cameraHeight: camera.cameraHeightM, horizon: camera.horizonPercent, shotMix: camera.shotMixPercent,
+    character: blueprint.character, environment: blueprint.environment, motion: blueprint.motion, shotGrammar: blueprint.shotGrammar,
+    continuity: blueprint.continuityLocks, avoid: blueprint.negativeConstraints,
+  });
+}
+
+const slugOf = value => text(value, 'untitled-style').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'untitled-style';
+const group = (value, fields) => Object.fromEntries(fields.map(field => [field, text(value?.[field])]));
+
 export function normalizeBlueprint(input = {}) {
   const base = PRESETS['stormbound-shonen'];
-  const source = { ...copy(base), ...copy(input) };
-  const palette = (source.palette || []).slice(0, 8).map((swatch, index) => ({
-    role: text(swatch.role, `colour-${index + 1}`),
-    value: /^#[0-9a-f]{6}$/i.test(swatch.value) ? swatch.value.toLowerCase() : '#777777',
-    share: number(swatch.share, 10, 0, 100),
+  const flat = input.schema === BLUEPRINT_SCHEMA ? flatten(input) : copy(input);
+  const source = { ...copy(base), ...defined(flat) };
+  for (const key of ['character', 'environment', 'motion', 'shotMix']) source[key] = { ...copy(base[key]), ...(flat[key] || {}) };
+  const palette = (Array.isArray(source.palette) ? source.palette : []).slice(0, 8).map((swatch, index) => ({
+    role: text(swatch?.role, `colour-${index + 1}`),
+    value: /^#[0-9a-f]{6}$/i.test(swatch?.value) ? swatch.value.toLowerCase() : '#777777',
+    share: number(swatch?.share, 10, 0, 100),
   }));
   const totalShare = palette.reduce((sum, swatch) => sum + swatch.share, 0) || 1;
   palette.forEach(swatch => { swatch.share = Number((swatch.share / totalShare * 100).toFixed(1)); });
-  return {
+
+  const used = new Set();
+  const shotGrammar = (Array.isArray(source.shotGrammar) ? source.shotGrammar : []).slice(0, 12).map((shot, index) => {
+    let id = slugOf(text(shot?.id, `shot-${index + 1}`)), suffix = 2;
+    while (used.has(id)) id = `${slugOf(shot?.id)}-${suffix++}`;
+    used.add(id);
+    return {
+      id, label: text(shot?.label, `Shot ${index + 1}`), size: ['wide', 'medium', 'close', 'insert'].includes(shot?.size) ? shot.size : 'medium',
+      lensMm: number(shot?.lensMm, 35, 14, 200), durationSec: number(shot?.durationSec, 2.5, 0.2, 30), angleDeg: number(shot?.angleDeg, 0, -90, 90),
+      move: text(shot?.move, 'locked'), purpose: text(shot?.purpose),
+    };
+  });
+  const motion = {
+    cadence: text(source.motion.cadence), anticipationFrames: number(source.motion.anticipationFrames, 6, 0, 48), impactFrames: number(source.motion.impactFrames, 3, 1, 12),
+    settleFrames: number(source.motion.settleFrames, 8, 0, 48), smearFrames: number(source.motion.smearFrames, 0, 0, 8), speedLineAngle: number(source.motion.speedLineAngle, 0, -180, 180),
+    parallaxRatio: text(source.motion.parallaxRatio),
+  };
+  const blueprint = {
     schema: BLUEPRINT_SCHEMA,
-    metadata: {
-      name: text(source.name, 'Untitled style'),
-      slug: text(source.slug, 'untitled-style').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''),
-      version: '1.0.0',
-      intent: text(source.intent),
-      generatedAt: new Date().toISOString(),
-    },
+    metadata: { name: text(source.name, 'Untitled style'), slug: slugOf(source.slug || source.name), version: '1.0.0', intent: text(source.intent), generatedAt: new Date().toISOString() },
     reference: normalizeReference(source.reference),
     canvas: {
       aspectRatio: ['16:9', '9:16', '1:1'].includes(source.aspectRatio) ? source.aspectRatio : '16:9',
-      frameRate: number(source.frameRate, 24, 12, 60),
-      animationStep: number(source.animationStep, 2, 1, 4),
-      safeAreaPercent: { action: 5, title: 10 },
+      frameRate: number(source.frameRate, 24, 12, 60), animationStep: number(source.animationStep, 2, 1, 4), safeAreaPercent: { action: 5, title: 10 },
     },
     rendering: {
       medium: text(source.medium), lineWeightPxAt1080p: number(source.lineWeight, 1.8, 0.2, 8), lineVariationPercent: number(source.lineVariation, 40, 0, 100),
@@ -135,16 +170,14 @@ export function normalizeBlueprint(input = {}) {
     },
     camera: {
       defaultLensMm: number(source.focalLength, 35, 14, 200), shutterAngleDeg: number(source.shutterAngle, 180, 45, 360),
-      cameraHeightM: number(source.cameraHeight, 1.35, 0.1, 12), horizonPercent: number(source.horizon, 46, 0, 100), shotMixPercent: copy(source.shotMix),
+      cameraHeightM: number(source.cameraHeight, 1.35, 0.1, 12), horizonPercent: number(source.horizon, 46, 0, 100),
+      shotMixPercent: Object.fromEntries(Object.entries(source.shotMix).map(([key, value]) => [key, number(value, 0, 0, 100)])),
     },
-    character: copy(source.character), environment: copy(source.environment), motion: copy(source.motion),
-    shotGrammar: (source.shotGrammar || []).slice(0, 12).map((shot, index) => ({
-      id: text(shot.id, `shot-${index + 1}`), label: text(shot.label, `Shot ${index + 1}`), size: text(shot.size, 'medium'),
-      lensMm: number(shot.lensMm, 35, 14, 200), durationSec: number(shot.durationSec, 2.5, 0.2, 30), angleDeg: number(shot.angleDeg, 0, -90, 90),
-      move: text(shot.move, 'locked'), purpose: text(shot.purpose),
-    })),
+    character: group(source.character, ['silhouette', 'proportions', 'faces', 'costume']),
+    environment: group(source.environment, ['geometry', 'detail', 'atmosphere']),
+    motion,
+    shotGrammar,
     continuityLocks: list(source.continuity), negativeConstraints: list(source.avoid),
-    promptContract: buildPromptContract(source),
     adapters: {
       polystudio: {
         aiRender: {
@@ -154,6 +187,14 @@ export function normalizeBlueprint(input = {}) {
       },
     },
   };
+  blueprint.promptContract = buildPromptContract({
+    intent: blueprint.metadata.intent, medium: blueprint.rendering.medium, lineWeight: blueprint.rendering.lineWeightPxAt1080p, lineVariation: blueprint.rendering.lineVariationPercent,
+    texture: blueprint.rendering.texturePercent, palette, saturation: blueprint.rendering.saturationPercent, contrast: blueprint.rendering.contrastPercent,
+    keyAngle: blueprint.lighting.keyAngleDeg, keySoftness: blueprint.lighting.keySoftnessPercent, fillRatio: blueprint.lighting.fillToKeyRatio, rimIntensity: blueprint.lighting.rimIntensityPercent,
+    focalLength: blueprint.camera.defaultLensMm, cameraHeight: blueprint.camera.cameraHeightM, horizon: blueprint.camera.horizonPercent, shutterAngle: blueprint.camera.shutterAngleDeg,
+    character: blueprint.character, environment: blueprint.environment, motion, avoid: blueprint.negativeConstraints,
+  });
+  return blueprint;
 }
 
 function normalizeReference(value) {
@@ -194,8 +235,8 @@ export function buildPromptContract(source) {
 }
 
 export function toPolyStudioPack(blueprint) {
-  const min = Math.min(...blueprint.shotGrammar.map(shot => shot.durationSec));
-  const max = Math.max(...blueprint.shotGrammar.map(shot => shot.durationSec));
+  const durations = blueprint.shotGrammar.map(shot => shot.durationSec);
+  const min = durations.length ? Math.min(...durations) : 1, max = durations.length ? Math.max(...durations) : 8;
   return {
     id: blueprint.metadata.slug,
     name: blueprint.metadata.name,

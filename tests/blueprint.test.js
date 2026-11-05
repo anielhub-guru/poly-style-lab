@@ -42,3 +42,40 @@ test('style guide contains the measured shot grammar and exclusions', () => {
   assert.match(guide, /Editorial Tableau/);
   assert.match(guide, /Glossy 3D materials/);
 });
+
+for (const id of Object.keys(PRESETS)) {
+  test(`a saved ${id} blueprint survives being loaded again (CLI/MCP round trip)`, () => {
+    const once = normalizeBlueprint({ ...PRESETS[id], name: 'My Edited Name', keyAngle: 12, continuity: ['Only this lock'] });
+    const twice = normalizeBlueprint(JSON.parse(JSON.stringify(once)));
+    const stable = value => ({ ...value, metadata: { ...value.metadata, generatedAt: '' } });
+    assert.deepEqual(stable(twice), stable(once));
+    assert.equal(twice.metadata.name, 'My Edited Name');
+    assert.equal(twice.lighting.keyAngleDeg, 12);
+    assert.deepEqual(twice.continuityLocks, ['Only this lock']);
+    assert.equal(twice.camera.defaultLensMm, PRESETS[id].focalLength);
+  });
+}
+
+test('zero is a real value, not a request for the default', () => {
+  const blueprint = normalizeBlueprint({ ...PRESETS['stormbound-shonen'], keyAngle: 0, horizon: 0, lineVariation: 0, fillRatio: 0 });
+  assert.equal(blueprint.lighting.keyAngleDeg, 0);
+  assert.equal(blueprint.camera.horizonPercent, 0);
+  assert.equal(blueprint.rendering.lineVariationPercent, 0);
+  assert.equal(blueprint.lighting.fillToKeyRatio, 0);
+});
+
+test('prompts use normalized values and never print undefined', () => {
+  const blueprint = normalizeBlueprint({ ...PRESETS['stormbound-shonen'], character: { silhouette: 'only this' }, frameRate: 500, focalLength: 1, motion: { impactFrames: 99 } });
+  assert.doesNotMatch(blueprint.promptContract.master, /undefined|NaN/);
+  assert.match(blueprint.promptContract.master, /only this/);
+  assert.equal(blueprint.motion.impactFrames, 12);
+  assert.match(blueprint.promptContract.master, /default 14mm/);
+});
+
+test('an empty shot list exports finite limits and duplicate shot labels get unique ids', () => {
+  const empty = toPolyStudioPack(normalizeBlueprint({ ...PRESETS['stormbound-shonen'], shotGrammar: [] }));
+  assert.ok(Object.values(empty.format.limits).every(Number.isFinite));
+  const shot = { id: 'same', label: 'Same', size: 'wide', lensMm: 35, durationSec: 2, angleDeg: 0, move: 'locked', purpose: 'x' };
+  const ids = normalizeBlueprint({ ...PRESETS['stormbound-shonen'], shotGrammar: [shot, shot, shot] }).shotGrammar.map(item => item.id);
+  assert.equal(new Set(ids).size, 3);
+});

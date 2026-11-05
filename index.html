@@ -14,7 +14,7 @@
     <nav class="app-tab-nav" aria-label="PolyStudio applications">
       <span class="app-tab">Character</span><span class="app-tab">Pose</span><span class="app-tab">Studio</span><span class="app-tab active">Style Lab</span>
     </nav>
-    <div class="status"><span class="pulse"></span><span id="completion">Blueprint 100% specified</span></div>
+    <div class="status"><span class="pulse"></span><span id="completion">Channel study required</span></div>
     <div class="actions">
       <button class="ghost" id="copyPrompt">Copy master prompt</button>
       <button class="primary" id="exportBlueprint">Export blueprint <span>↓</span></button>
@@ -69,10 +69,10 @@
       </section>
 
       <section class="panel reference-panel" data-section="reference" aria-labelledby="reference-title">
-        <div class="panel-title"><span>00</span><div><h2 id="reference-title">Channel study</h2><p>Download a representative set, inspect every frame at 30 FPS, and derive patterns from measurements.</p></div></div>
+        <div class="panel-title"><span>00</span><div><h2 id="reference-title">Channel study</h2><p>Measure 10–20 Shorts (first 45 s of each): native-rate animation cadence, cuts and body motion, as numbers.</p></div></div>
         <div class="source-console">
-          <label class="source-url">YouTube channel, playlist, video, or local folder<textarea id="sourceInput" rows="3" placeholder="https://youtube.com/@channel/videos"></textarea></label>
-          <label class="video-count">Study size<input id="videoCount" type="number" min="10" max="20" value="15"><em>videos</em></label>
+          <label class="source-url">YouTube channel (its Shorts), shorts or video URL, or local folder<textarea id="sourceInput" rows="3" placeholder="https://www.youtube.com/@channel"></textarea></label>
+          <label class="video-count">Study size<input id="videoCount" type="number" min="1" max="20" value="12"><em>videos · 10–20 best</em></label>
           <button class="primary analyse-button" id="startAnalysis" type="button">Start measured study</button>
           <div class="analysis-clock"><b>30</b><span>FPS<br>ANALYSIS CLOCK</span></div>
         </div>

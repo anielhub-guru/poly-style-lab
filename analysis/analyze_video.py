@@ -1,18 +1,39 @@
 #!/usr/bin/env python3
-"""Measure animation motion from a CFR 30 FPS video using MediaPipe landmarks."""
+"""Measure animation cadence, cuts and body motion for ONE short video.
+
+Pass A reads the SOURCE at its native frame rate (tiny gray frames, via ffmpeg) so that
+animating on ones/twos/threes and hard cuts are measured on the real frame grid.
+Pass B reads the 30 FPS NORMALIZED clip and runs pose tracking only on frames whose picture
+changed. Speeds are in shoulder-widths per second, so framing and resolution do not matter.
+
+Pose tracking (opencv + mediapipe) is optional: without it only pass A runs.
+"""
 
 import argparse
 import json
-import math
-import statistics
+import re
+import subprocess
+import sys
+import warnings
 from pathlib import Path
 
-import cv2
-import mediapipe as mp
 import numpy as np
 
+try:
+    import cv2
+    import mediapipe as mp
+except ImportError:  # pose is optional
+    cv2 = None
+    mp = None
 
+VERSION = 2
 FPS = 30.0
+HOLD = 0.85        # mean abs gray difference (0-255, 160x90) below which the picture is "held"
+CUT_MIN = 22.0     # a cut needs at least this difference ...
+CUT_RATIO = 5.0    # ... and this many times the typical moving-frame difference
+MAX_GAP = 8        # frames of tracking loss after which a speed sample is not trusted
+BIN = 6            # frames per bin when correlating mouth and body (0.2 s)
+
 POSE_GROUPS = {
     "head": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
     "shoulders": [11, 12],
@@ -21,192 +42,303 @@ POSE_GROUPS = {
     "hips": [23, 24],
     "legs": [25, 26, 27, 28, 29, 30, 31, 32],
 }
-FACE_GROUPS = {
-    "mouth": [13, 14, 61, 291, 78, 308],
-    "brows": [65, 105, 295, 334, 70, 300],
-    "eyes": [33, 133, 263, 362, 159, 145, 386, 374],
-}
 
 
-def percentile(values, p):
-    if not values:
-        return 0.0
-    return float(np.percentile(np.asarray(values, dtype=np.float64), p))
+def r(value, places=4):
+    return round(float(value), places)
 
 
 def summary(values):
-    if not values:
-        return {"samples": 0, "mean": 0, "median": 0, "p10": 0, "p90": 0, "p95": 0, "max": 0}
+    data = np.asarray([v for v in values if v is not None and np.isfinite(v)], dtype=np.float64)
+    if data.size == 0:
+        return {"samples": 0}
     return {
-        "samples": len(values),
-        "mean": round(float(statistics.fmean(values)), 6),
-        "median": round(float(statistics.median(values)), 6),
-        "p10": round(percentile(values, 10), 6),
-        "p90": round(percentile(values, 90), 6),
-        "p95": round(percentile(values, 95), 6),
-        "max": round(float(max(values)), 6),
+        "samples": int(data.size), "median": r(np.median(data)), "mean": r(data.mean()),
+        "p10": r(np.percentile(data, 10)), "p90": r(np.percentile(data, 90)),
+        "p95": r(np.percentile(data, 95)), "max": r(data.max()),
     }
 
 
-def points(landmarks, indexes):
+# ---------------------------------------------------------------- pass A: native cadence, cuts
+
+def native_fps(path):
+    err = subprocess.run(["ffmpeg", "-hide_banner", "-i", str(path)], capture_output=True, text=True).stderr
+    for pattern in (r"(\d+(?:\.\d+)?) fps", r"(\d+(?:\.\d+)?) tbr"):
+        match = re.search(pattern, err)
+        if match and float(match.group(1)) > 0:
+            return float(match.group(1))
+    return 30.0
+
+
+def gray_frames(path, max_sec):
+    command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(path), "-t", str(max_sec), "-an",
+               "-vf", "scale=160:90:flags=area,format=gray", "-f", "rawvideo", "-"]
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    size = 160 * 90
+    try:
+        while True:
+            buffer = process.stdout.read(size)
+            if len(buffer) < size:
+                break
+            yield np.frombuffer(buffer, dtype=np.uint8).astype(np.int16)
+    finally:
+        process.stdout.close()
+        process.wait()
+
+
+def pass_a(source, max_sec):
+    fps = native_fps(source)
+    diffs, previous = [], None
+    for frame in gray_frames(source, max_sec):
+        diffs.append(0.0 if previous is None else float(np.abs(frame - previous).mean()))
+        previous = frame
+    frames = len(diffs)
+    if frames < 6:
+        raise RuntimeError("video is too short or unreadable")
+    d = np.asarray(diffs[1:])
+    moving = d[d >= HOLD]
+    typical = float(np.median(moving)) if moving.size else 0.0
+    cut_threshold = max(CUT_MIN, CUT_RATIO * typical)
+
+    cuts = []
+    for index, value in enumerate(d, start=1):
+        if value >= cut_threshold and (not cuts or index - cuts[-1] > 2):
+            cuts.append(index)
+
+    distinct = [0] + [i for i, v in enumerate(d, start=1) if v >= HOLD]
+    intervals = [int(x) for x in np.diff(distinct)]  # frames each picture stayed on screen
+    shares = {}
+    if len(intervals) >= 3:
+        for label, test in (("ones", lambda x: x == 1), ("twos", lambda x: x == 2), ("threes", lambda x: x == 3), ("fourPlus", lambda x: x >= 4)):
+            shares[label] = r(sum(1 for x in intervals if test(x)) / len(intervals))
+        step_label = max(shares, key=shares.get)
+        step = {"ones": 1, "twos": 2, "threes": 3}.get(step_label) or int(np.median([x for x in intervals if x >= 4]))
+    else:
+        step = None
+    holds = [x - 1 for x in intervals if x > 1]
+
+    boundaries = [0] + cuts + [frames]
+    shot_lengths = [(b - a) / fps for a, b in zip(boundaries, boundaries[1:]) if b - a >= 3]
+    longest = max(range(len(boundaries) - 1), key=lambda i: boundaries[i + 1] - boundaries[i])
+    duration = frames / fps
+    return {
+        "nativeFps": r(fps, 3), "nativeFrames": frames, "analysedSec": r(duration, 2),
+        "cadence": {
+            "animationStepNativeFrames": step, "estimatedContentFps": r(fps / step, 2) if step else None,
+            "imageIntervalMs": summary([x / fps * 1000 for x in intervals]),
+            "intervalShare": shares, "duplicateFrameRatio": r(float((d < HOLD).sum()) / len(d)),
+            "holdFrames": summary(holds),
+        },
+        "shots": {"cuts": len(cuts), "cutsPerMinute": r(len(cuts) / duration * 60, 2), "lengthSec": summary(shot_lengths)},
+        "motionEnergy": summary(moving.tolist()),
+        "_typicalDiff": typical, "_cutThreshold": cut_threshold,
+        "_fallbackTimeSec": (boundaries[longest] + boundaries[longest + 1]) / 2 / fps,
+    }
+
+
+# ---------------------------------------------------------------- pass B: pose motion at 30 fps
+
+def landmark_xy(landmarks, index, width, height, minimum=0.35):
     if landmarks is None:
         return None
-    visible = []
-    for index in indexes:
-        landmark = landmarks.landmark[index]
-        if getattr(landmark, "visibility", 1.0) >= 0.35:
-            visible.append((landmark.x, landmark.y, getattr(landmark, "z", 0.0)))
-    return np.asarray(visible, dtype=np.float64) if visible else None
+    point = landmarks.landmark[index]
+    if getattr(point, "visibility", 1.0) < minimum:
+        return None
+    return np.array([point.x * width, point.y * height])
 
 
-def centroid(landmarks, indexes):
-    value = points(landmarks, indexes)
-    return value.mean(axis=0) if value is not None else None
+def centroid_px(landmarks, indexes, width, height):
+    points = [p for p in (landmark_xy(landmarks, i, width, height) for i in indexes) if p is not None]
+    return np.mean(points, axis=0) if points else None
 
 
-def distance(a, b):
-    return float(np.linalg.norm(a[:2] - b[:2])) if a is not None and b is not None else None
+def binned(series, scale=1.0):
+    data = np.asarray(series, dtype=np.float64) / scale
+    usable = len(data) // BIN * BIN
+    if usable == 0:
+        return np.array([])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        return np.nanmean(data[:usable].reshape(-1, BIN), axis=1)
 
 
 def correlation(a, b):
-    length = min(len(a), len(b))
-    if length < 8:
-        return 0.0
-    left, right = np.asarray(a[-length:]), np.asarray(b[-length:])
-    if np.std(left) < 1e-8 or np.std(right) < 1e-8:
-        return 0.0
-    return round(float(np.corrcoef(left, right)[0, 1]), 4)
+    mask = np.isfinite(a) & np.isfinite(b)
+    if mask.sum() < 12 or np.std(a[mask]) < 1e-9 or np.std(b[mask]) < 1e-9:
+        return None
+    return r(np.corrcoef(a[mask], b[mask])[0, 1])
 
 
-def analyse(path):
-    capture = cv2.VideoCapture(str(path))
-    reported_fps = capture.get(cv2.CAP_PROP_FPS)
-    if abs(reported_fps - FPS) > 0.05:
-        raise RuntimeError(f"Expected normalized 30 FPS input, received {reported_fps:.3f} FPS")
-
+def pass_b(normalized, cut_threshold, typical_diff, fallback_time):
+    capture = cv2.VideoCapture(str(normalized))
+    if abs(capture.get(cv2.CAP_PROP_FPS) - FPS) > 0.5:
+        raise RuntimeError(f"normalized clip is {capture.get(cv2.CAP_PROP_FPS):.2f} fps, expected 30")
+    width, height = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)), int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
     holistic = mp.solutions.holistic.Holistic(
-        static_image_mode=False,
-        model_complexity=1,
-        smooth_landmarks=False,
-        refine_face_landmarks=True,
-        min_detection_confidence=0.45,
-        min_tracking_confidence=0.45,
-    )
-    positions = {group: [] for group in POSE_GROUPS}
-    velocities = {group: [] for group in POSE_GROUPS}
-    accelerations = {group: [] for group in POSE_GROUPS}
-    face_series = {group: [] for group in FACE_GROUPS}
-    previous_position = {}
-    previous_velocity = {}
-    frame_diffs, holds, hold_runs, current_hold = [], [], [], 0
-    mouth_aperture, head_speed, shoulder_speed, hand_speed = [], [], [], []
-    tracked_frames = 0
-    representative = {"frame": 0, "score": -1.0}
-    previous_gray = None
-    frame_index = 0
+        static_image_mode=False, model_complexity=0, smooth_landmarks=False, refine_face_landmarks=False,
+        min_detection_confidence=0.4, min_tracking_confidence=0.4)
+
+    samples = {g: [] for g in POSE_GROUPS}      # (frame, px/s)
+    accel = {g: [] for g in POSE_GROUPS}        # px/s^2
+    series = {g: [] for g in POSE_GROUPS}       # per-frame px/s, NaN = unknown, 0 = picture held
+    mouth_series, shoulder_widths, ear_widths = [], [], []
+    prev_pos, prev_idx, prev_v = {}, {}, {}
+    last_ok = {g: False for g in POSE_GROUPS}
+    last_mouth, last_pose = np.nan, False
+    pose_frames = processed = 0
+    previous, best = None, {"score": -1e9, "frame": None}
+    index = 0
 
     while True:
         ok, frame = capture.read()
         if not ok:
             break
-        small = cv2.resize(frame, (160, 90), interpolation=cv2.INTER_AREA)
-        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-        frame_diff = 0.0 if previous_gray is None else float(cv2.absdiff(gray, previous_gray).mean())
-        frame_diffs.append(frame_diff)
-        held = previous_gray is not None and frame_diff < 0.85
-        holds.append(held)
+        small = cv2.cvtColor(cv2.resize(frame, (160, 90), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY).astype(np.int16)
+        diff = 0.0 if previous is None else float(np.abs(small - previous).mean())
+        previous = small
+        cut = index > 0 and diff >= cut_threshold
+        held = index > 0 and diff < HOLD and not cut
+        if cut:
+            prev_pos.clear(); prev_idx.clear(); prev_v.clear()
+            last_ok = {g: False for g in POSE_GROUPS}
+            last_mouth, last_pose = np.nan, False
+
         if held:
-            current_hold += 1
-        elif current_hold:
-            hold_runs.append(current_hold)
-            current_hold = 0
-        previous_gray = gray
+            for g in POSE_GROUPS:
+                series[g].append(0.0 if last_ok[g] else np.nan)
+            mouth_series.append(last_mouth)
+            pose_frames += int(last_pose)
+        else:
+            processed += 1
+            result = holistic.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            pose, face = result.pose_landmarks, result.face_landmarks
+            last_pose = pose is not None
+            pose_frames += int(last_pose)
+            if pose is not None:
+                a, b = landmark_xy(pose, 11, width, height), landmark_xy(pose, 12, width, height)
+                if a is not None and b is not None:
+                    shoulder_widths.append(float(np.linalg.norm(a - b)))
+                a, b = landmark_xy(pose, 7, width, height), landmark_xy(pose, 8, width, height)
+                if a is not None and b is not None:
+                    ear_widths.append(float(np.linalg.norm(a - b)))
+                if index >= 15:
+                    score = -abs(diff - typical_diff)
+                    if score > best["score"]:
+                        best = {"score": score, "frame": index}
+            for g, ids in POSE_GROUPS.items():
+                current = centroid_px(pose, ids, width, height)
+                if current is None:
+                    series[g].append(np.nan); last_ok[g] = False
+                    continue
+                before = prev_pos.get(g)
+                if before is not None and index - prev_idx[g] <= MAX_GAP:
+                    dt = (index - prev_idx[g]) / FPS
+                    speed = float(np.linalg.norm(current - before)) / dt
+                    samples[g].append((index, speed)); series[g].append(speed)
+                    if g in prev_v:
+                        accel[g].append(abs(speed - prev_v[g][0]) / ((index - prev_v[g][1]) / FPS))
+                    prev_v[g] = (speed, index)
+                else:
+                    series[g].append(np.nan); prev_v.pop(g, None)
+                prev_pos[g], prev_idx[g], last_ok[g] = current, index, True
+            aperture = np.nan
+            if face is not None:
+                top, bottom = landmark_xy(face, 13, width, height, 0), landmark_xy(face, 14, width, height, 0)
+                left, right = landmark_xy(face, 234, width, height, 0), landmark_xy(face, 454, width, height, 0)
+                face_width = float(np.linalg.norm(left - right))
+                if face_width > 1:
+                    aperture = float(np.linalg.norm(top - bottom)) / face_width
+            last_mouth = aperture
+            mouth_series.append(aperture)
+        index += 1
 
-        result = holistic.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        pose = result.pose_landmarks
-        face = result.face_landmarks
-        if pose is not None:
-            tracked_frames += 1
-        confidence = 1.0 if pose is not None else 0.0
-        score = confidence - abs(frame_diff - 4.0) * 0.015
-        if frame_index > 15 and score > representative["score"]:
-            representative = {"frame": frame_index, "score": score}
-
-        for group, indexes in POSE_GROUPS.items():
-            current = centroid(pose, indexes)
-            if current is None:
-                continue
-            positions[group].append(current.tolist())
-            prior = previous_position.get(group)
-            velocity = distance(current, prior) * FPS if prior is not None else 0.0
-            velocities[group].append(velocity)
-            prior_velocity = previous_velocity.get(group)
-            if prior_velocity is not None:
-                accelerations[group].append(abs(velocity - prior_velocity) * FPS)
-            previous_position[group] = current
-            previous_velocity[group] = velocity
-
-        for group, indexes in FACE_GROUPS.items():
-            current = centroid(face, indexes)
-            if current is not None:
-                face_series[group].append(current.tolist())
-        if face is not None:
-            top = points(face, [13])
-            bottom = points(face, [14])
-            mouth_aperture.append(distance(top[0], bottom[0]) if top is not None and bottom is not None else 0.0)
-        head_speed.append(velocities["head"][-1] if velocities["head"] else 0.0)
-        shoulder_speed.append(velocities["shoulders"][-1] if velocities["shoulders"] else 0.0)
-        hand_speed.append(velocities["hands"][-1] if velocities["hands"] else 0.0)
-        frame_index += 1
-
-    if current_hold:
-        hold_runs.append(current_hold)
     holistic.close()
     capture.release()
+    frames = index
+    ratio = pose_frames / max(1, frames)
 
-    motion_threshold = percentile(frame_diffs[1:], 90)
-    pose_jumps = []
-    for group, values in velocities.items():
-        threshold = percentile(values, 95)
-        pose_jumps.extend({"group": group, "frame": index, "timeSec": round(index / FPS, 3), "speed": round(value, 5)} for index, value in enumerate(values) if threshold > 0 and value >= threshold)
-    pose_jumps = sorted(pose_jumps, key=lambda item: item["speed"], reverse=True)[:80]
+    if shoulder_widths:
+        scale, basis = float(np.median(shoulder_widths)), "shoulder-width"
+    elif ear_widths:
+        scale, basis = float(np.median(ear_widths)) * 2.7, "ear-width-x2.7"
+    else:
+        scale, basis = height * 0.25, "frame-height-x0.25"
+    scale = max(scale, 1.0)
 
-    talking = [value > percentile(mouth_aperture, 60) for value in mouth_aperture]
-    talk_head = [head_speed[index] for index in range(min(len(talking), len(head_speed))) if talking[index]]
-    quiet_head = [head_speed[index] for index in range(min(len(talking), len(head_speed))) if not talking[index]]
+    enough = len(samples["head"]) + len(samples["shoulders"]) >= 20
+    usable = ratio >= 0.3 and enough and basis != "frame-height-x0.25"
+    reason = None if usable else (f"pose tracked on only {ratio:.0%} of frames" if ratio < 0.3 else "too few body-motion samples" if not enough else "no shoulders or ears visible to scale motion")
+
+    body = {g: {"speedPerSec": summary([v / scale for _, v in samples[g]]), "accelerationPerSec2": summary([a / scale for a in accel[g]])} for g in POSE_GROUPS}
+
+    # snap accents: unusually fast moments, merged across body groups
+    events = []
+    for g, values in samples.items():
+        speeds = np.array([v for _, v in values])
+        if speeds.size < 8:
+            continue
+        threshold = max(np.percentile(speeds, 90), 3 * np.median(speeds))
+        events += [(i, g, v / scale) for i, v in values if v >= threshold]
+    events.sort()
+    merged = []
+    for i, g, v in events:
+        if merged and i - merged[-1]["frame"] <= 3:
+            merged[-1]["groups"].add(g); merged[-1]["speed"] = max(merged[-1]["speed"], v)
+        else:
+            merged.append({"frame": i, "groups": {g}, "speed": v})
+    seconds = frames / FPS
+    snaps = {
+        "count": len(merged), "per10s": r(len(merged) * 10 / seconds, 2) if seconds else 0,
+        "top": [{"timeSec": r(m["frame"] / FPS, 2), "groups": sorted(m["groups"]), "speedPerSec": r(m["speed"], 3)} for m in sorted(merged, key=lambda m: -m["speed"])[:8]],
+    }
+
+    mouth = binned(mouth_series)
+    co_speech = None
+    if np.isfinite(mouth).sum() >= 12:
+        head, shoulders, hands = (binned(series[g], scale) for g in ("head", "shoulders", "hands"))
+        size = min(len(mouth), len(head))
+        threshold = np.nanpercentile(mouth, 60)
+        active, quiet = mouth[:size] > threshold, mouth[:size] <= threshold
+        valid = np.isfinite(head[:size]) & np.isfinite(mouth[:size])
+        co_speech = {
+            "mouthHeadCorrelation": correlation(mouth[:size], head[:size]),
+            "mouthShoulderCorrelation": correlation(mouth[:min(len(mouth), len(shoulders))], shoulders[:min(len(mouth), len(shoulders))]),
+            "mouthHandCorrelation": correlation(mouth[:min(len(mouth), len(hands))], hands[:min(len(mouth), len(hands))]),
+            "headSpeedMouthActive": summary(head[:size][active & valid].tolist()),
+            "headSpeedMouthQuiet": summary(head[:size][quiet & valid].tolist()),
+        }
+
+    representative = best["frame"] if best["frame"] is not None else int(fallback_time * FPS)
     return {
-        "analysisClock": {"fps": 30, "frameDurationMs": 33.333333, "constantFrameRate": True},
-        "video": {"path": str(path), "frames": frame_index, "durationSec": round(frame_index / FPS, 3), "trackedFrameRatio": round(tracked_frames / max(1, frame_index), 4)},
-        "representativeFrame": {"frame": representative["frame"], "timeSec": round(representative["frame"] / FPS, 3)},
-        "frameCadence": {
-            "duplicateFrameRatio": round(sum(holds) / max(1, len(holds)), 6),
-            "holdLengthsFrames": summary(hold_runs),
-            "frameDifference": summary(frame_diffs[1:]),
-            "highMotionThreshold": round(motion_threshold, 6),
-        },
-        "bodyMotion": {group: {"speedNormalizedPerSec": summary(velocities[group]), "accelerationNormalizedPerSec2": summary(accelerations[group])} for group in POSE_GROUPS},
-        "faceMotion": {
-            "mouthApertureNormalized": summary(mouth_aperture),
-            "mouthHeadCorrelation": correlation(mouth_aperture, head_speed),
-            "mouthShoulderCorrelation": correlation(mouth_aperture, shoulder_speed),
-            "mouthHandCorrelation": correlation(mouth_aperture, hand_speed),
-            "headSpeedWhileMouthActive": summary(talk_head),
-            "headSpeedWhileMouthQuiet": summary(quiet_head),
-        },
-        "snapEvents": pose_jumps,
-        "confidence": {"poseTracking": round(tracked_frames / max(1, frame_index), 4), "semanticMotion": "measured-landmarks"},
+        "pose": {"available": True, "usable": usable, "reason": reason, "trackedFrameRatio": r(ratio), "processedFrames": processed, "frames": frames, "scalePx": r(scale, 1), "scaleBasis": basis},
+        "bodyMotion": body, "coSpeech": co_speech, "snapEvents": snaps, "representativeFrame": {"frame": representative, "timeSec": r(representative / FPS, 2)},
     }
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("video", type=Path)
+    parser.add_argument("source", type=Path, help="original video (native frame rate)")
+    parser.add_argument("normalized", type=Path, help="constant 30 FPS clip")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--max-sec", type=float, default=45)
+    parser.add_argument("--no-pose", action="store_true")
     args = parser.parse_args()
-    result = analyse(args.video)
+
+    result = pass_a(args.source, args.max_sec)
+    typical, threshold, fallback = result.pop("_typicalDiff"), result.pop("_cutThreshold"), result.pop("_fallbackTimeSec")
+    result = {"version": VERSION, "analysisClock": {"fps": 30, "constantFrameRate": True}, **result}
+    if cv2 is not None and mp is not None and not args.no_pose:
+        result.update(pass_b(args.normalized, threshold, typical, fallback))
+    else:
+        result.update({"pose": {"available": False, "usable": False, "reason": "pose tracking not installed or disabled"}, "bodyMotion": None, "coSpeech": None, "snapEvents": None,
+                       "representativeFrame": {"frame": int(fallback * FPS), "timeSec": r(fallback, 2)}})
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    args.output.write_text(json.dumps(result, separators=(",", ":")), encoding="utf-8")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as error:  # surfaced to the Node caller
+        print(f"{type(error).__name__}: {error}", file=sys.stderr)
+        sys.exit(1)
