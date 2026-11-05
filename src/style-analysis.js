@@ -4,7 +4,7 @@ import { runProcess } from './process.js';
 import { projectRoot } from './environment.js';
 import { lensToFov } from './blueprint.js';
 
-export const ANALYSIS_VERSION = 2;
+export const ANALYSIS_VERSION = 3;
 const analyser = join(projectRoot, 'analysis', 'analyze_video.py');
 const GROUPS = ['head', 'shoulders', 'hands', 'torso', 'hips', 'legs'];
 const fileId = id => String(id).replace(/[^a-z0-9_-]/gi, '_');
@@ -86,15 +86,23 @@ export function aggregateMeasurements(measurements, catalog, { skipped = [], war
     headSpeedRatioActiveOverQuiet: distribution(per(talking, item => item.coSpeech.headSpeedMouthActive.median / item.coSpeech.headSpeedMouthQuiet.median)),
   } : null;
 
+  const moving = measurements.filter(item => item.motion);
+  const motion = moving.length ? {
+    regionShare: Object.fromEntries(['top', 'middle', 'bottom', 'left', 'center', 'right'].map(key => [key, distribution(per(moving, item => item.motion.regionShare[key]))])),
+    activeAreaRatio: distribution(per(moving, item => item.motion.activeAreaRatio.median)),
+    energyPerSec: distribution(per(moving, item => item.motion.energyPerSec.median)),
+    burstiness: distribution(per(moving, item => item.motion.burstiness)),
+    accentsPer10s: distribution(per(moving, item => item.motion.accents.per10s)),
+  } : null;
   const measuredPatterns = {
-    cadence, shots, motionEnergy: distribution(per(measurements, item => item.motionEnergy.median)),
+    cadence, shots, motion, motionEnergy: distribution(per(measurements, item => item.motionEnergy.median)),
     bodyMotion, coSpeechMotion, snapEventsPer10s: posed.length ? distribution(per(posed, item => item.snapEvents.per10s)) : null,
   };
   const trackedRatios = measurements.filter(item => item.pose?.available).map(item => item.pose.trackedFrameRatio);
   const confidence = {
     analysedVideos: measurements.length, poseUsableVideos: posed.length,
     meanPoseTrackedFrameRatio: trackedRatios.length ? round(trackedRatios.reduce((a, b) => a + b, 0) / trackedRatios.length, 3) : 0,
-    cadence: level(measurements.length), bodyMotion: poseAvailable ? level(posed.length) : 'unavailable',
+    cadence: level(measurements.length), movement: level(moving.length), bodyMotion: poseAvailable ? level(posed.length) : 'unavailable',
     basis: 'native-rate cadence + 30fps landmark motion in shoulder-widths per second',
   };
   const allWarnings = [...warnings, ...(catalog.warnings || [])];
@@ -114,11 +122,17 @@ export function aggregateMeasurements(measurements, catalog, { skipped = [], war
 const num = (value, places = 2) => Number.isFinite(value) ? String(round(value, places)) : '?';
 
 export function summaryLines(blueprint) {
-  const { cadence, shots, bodyMotion, coSpeechMotion, snapEventsPer10s } = blueprint.measuredPatterns;
+  const { cadence, shots, motion, bodyMotion, coSpeechMotion, snapEventsPer10s } = blueprint.measuredPatterns;
   const lines = [];
   const step = cadence.dominantStepNativeFrames;
   lines.push(`Cadence: ${step ? `pictures change every ${step} native frame(s)` : 'step not determined'} (~${num(cadence.estimatedContentFps.median, 1)} drawings/s at ${num(cadence.nativeFps.median, 0)} fps source); ${num(cadence.duplicateFrameRatio.median * 100, 0)}% of frames repeat the previous picture; holds up to ${num(cadence.holdFrames.median, 0)} frames.`);
   lines.push(`Editing: a cut every ${num(shots.lengthSec.typical.median, 1)}s typically (short ${num(shots.lengthSec.short.median, 1)}s, long ${num(shots.lengthSec.long.median, 1)}s); ${num(shots.cutsPerMinute.median, 1)} cuts/min.`);
+  if (motion) {
+    const pct = value => num(value * 100, 0), share = motion.regionShare, area = motion.activeAreaRatio.median, burst = motion.burstiness.median;
+    const spread = area < 0.05 ? 'localized (limited animation)' : area < 0.2 ? 'moderate' : 'full-frame';
+    const feel = burst > 2.5 ? 'punchy' : burst < 1.5 ? 'steady' : 'varied';
+    lines.push(`Movement: ${pct(share.top.median)}% top / ${pct(share.middle.median)}% middle / ${pct(share.bottom.median)}% bottom third; ${spread} (~${num(area * 100, 1)}% of the frame changes at once); ${feel} (peak/typical ${num(burst, 1)}); ~${num(motion.accentsPer10s.median, 1)} accents per 10s.`);
+  }
   if (bodyMotion) {
     lines.push(`Body speed (shoulder-widths/s, median / peak): ${GROUPS.map(group => `${group} ${num(bodyMotion[group].speedPerSec.median)}/${num(bodyMotion[group].peakSpeedPerSec.median)}`).join('; ')}.`);
     if (snapEventsPer10s) lines.push(`Accents: ~${num(snapEventsPer10s.median, 1)} sharp snap moments per 10s.`);

@@ -2,7 +2,6 @@ import { mkdir, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runProcess } from './process.js';
 import { ytDlpPath } from './environment.js';
-import { cobaltConfigured, cobaltDownload } from './cobalt.js';
 
 export const safeName = value => String(value).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 72) || 'video';
 
@@ -14,17 +13,11 @@ export async function acquire(item, workspace, maxSeconds) {
   const stem = safeName(item.id);
   const existing = (await readdir(dir)).find(name => name.startsWith(`${stem}.`));
   if (existing) return join(dir, existing);
-  try {
-    await runProcess(await ytDlpPath(), [
-      '--no-playlist', '--no-warnings', '--no-progress', '--retries', '2', '--socket-timeout', '20', '--max-filesize', '60M',
-      '-f', 'bv[height<=480][vcodec^=avc1]/bv[height<=480]/b[height<=480]/bv/b',
-      '--download-sections', `*0-${maxSeconds}`, '-o', join(dir, `${stem}.%(ext)s`), item.url,
-    ], { timeoutMs: 240_000 });
-  } catch (error) {
-    if (!cobaltConfigured()) throw error;
-    try { return await cobaltDownload(item.url, join(dir, `${stem}.mp4`)); }
-    catch (fallback) { throw new Error(`${error.message} | ${fallback.message}`); }
-  }
+  await runProcess(await ytDlpPath(), [
+    '--no-playlist', '--no-warnings', '--no-progress', '--retries', '2', '--socket-timeout', '20', '--max-filesize', '60M',
+    '-f', 'bv[height<=480][vcodec^=avc1]/bv[height<=480]/b[height<=480]/bv/b',
+    '--download-sections', `*0-${maxSeconds}`, '-o', join(dir, `${stem}.%(ext)s`), item.url,
+  ], { timeoutMs: 240_000 });
   const saved = (await readdir(dir)).find(name => name.startsWith(`${stem}.`) && !name.endsWith('.part'));
   if (!saved) throw new Error('download produced no file');
   return join(dir, saved);

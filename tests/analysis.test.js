@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { evenlySpaced, selectEntries, shortsUrl } from '../src/source-catalog.js';
+import { evenlySpaced, selectEntries, shortsUrl, singleVideoId } from '../src/source-catalog.js';
 import { aggregateMeasurements, distribution, toMotionPack } from '../src/style-analysis.js';
 
 const exec = promisify(execFile);
@@ -16,6 +16,7 @@ const measurement = (id, { usable = true, step = 2, scale = 1 } = {}) => ({
   version: 2, nativeFps: 30, analysedSec: 30,
   cadence: { animationStepNativeFrames: step, estimatedContentFps: 30 / step, imageIntervalMs: stat(33 * step), duplicateFrameRatio: 1 - 1 / step, holdFrames: { p90: step - 1 } },
   shots: { cuts: 5, cutsPerMinute: 10, lengthSec: { median: 3, p10: 1.5, p90: 5 } }, motionEnergy: stat(4),
+  motion: { regionShare: { top: 0.7, middle: 0.2, bottom: 0.1, left: 0.3, center: 0.4, right: 0.3 }, activeAreaRatio: stat(0.03), energyPerSec: stat(30), burstiness: 2, accents: { per10s: 2 } },
   pose: { available: true, usable, trackedFrameRatio: usable ? 0.8 : 0.05 },
   bodyMotion: usable ? Object.fromEntries(GROUPS.map(group => [group, { speedPerSec: stat(0.5 * scale), accelerationPerSec2: stat(3 * scale) }])) : Object.fromEntries(GROUPS.map(group => [group, { speedPerSec: { samples: 0 }, accelerationPerSec2: { samples: 0 } }])),
   coSpeech: usable ? { mouthHeadCorrelation: 0.5, mouthShoulderCorrelation: null, mouthHandCorrelation: 0.1, headSpeedMouthActive: stat(0.6), headSpeedMouthQuiet: stat(0.3) } : null,
@@ -50,7 +51,8 @@ test('videos without usable pose still count for cadence but not for body motion
   assert.equal(blueprint.confidence.poseUsableVideos, 2);
   assert.ok(blueprint.warnings.some(line => line.includes('1 of 3')));
   assert.equal(blueprint.measuredPatterns.coSpeechMotion.mouthShoulderCorrelation.videos, 0);
-  assert.ok(blueprint.summary.length <= 6, 'summary stays compact for agents');
+  assert.ok(blueprint.summary.length <= 8, 'summary stays compact for agents');
+  assert.match(blueprint.summary.join('\n'), /Movement: 70% top \/ 20% middle \/ 10% bottom third; localized \(limited animation\)/);
   assert.ok(JSON.stringify(blueprint).length < 20_000, 'blueprint stays compact');
 });
 
@@ -59,6 +61,8 @@ test('a study with no pose still produces a cadence and cutting contract and a v
   const blueprint = aggregateMeasurements(none, catalog, { poseAvailable: false });
   assert.equal(blueprint.measuredPatterns.bodyMotion, null);
   assert.equal(blueprint.confidence.bodyMotion, 'unavailable');
+  assert.equal(blueprint.measuredPatterns.motion.regionShare.top.median, 0.7, 'landmark-free movement needs no pose');
+  assert.match(toMotionPack(blueprint).format.guidance, /Movement:/);
   const pack = toMotionPack(blueprint, { name: 'Test study' });
   assert.equal(pack.type, 'story-format');
   assert.ok(Number.isFinite(pack.format.limits.minShot) && pack.format.limits.maxShot > pack.format.limits.minShot);
@@ -103,4 +107,24 @@ test('pose pass converts landmark motion to shoulder-widths per second, skipping
   assert.ok(result.coSpeech && Number.isFinite(result.coSpeech.mouthHeadCorrelation), 'mouth and head are correlated per frame');
   assert.ok(result.coSpeech.headSpeedMouthActive.samples > 0 && result.coSpeech.headSpeedMouthQuiet.samples > 0);
   assert.ok(result.snapEvents.count >= 0 && Array.isArray(result.snapEvents.top));
+});
+
+test('single-video URLs are recognised without listing; channels are not', () => {
+  assert.equal(singleVideoId('https://www.youtube.com/shorts/GmBXKjzM11w'), 'GmBXKjzM11w');
+  assert.equal(singleVideoId('https://youtu.be/dQw4w9WgXcQ?t=3'), 'dQw4w9WgXcQ');
+  assert.equal(singleVideoId('https://www.youtube.com/@abc'), null);
+});
+
+test('landmark-free motion finds WHERE a small local movement happens, and still reads its cadence', { skip: !(python && ffmpeg) && 'needs ffmpeg and numpy' }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'psl-'));
+  const clip = join(dir, 'box.mp4'), out = join(dir, 'out.json');
+  // a small box sweeping through the TOP third of an otherwise still frame, 15 distinct pictures/s shown twice
+  await exec('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=gray:s=320x568:r=15:d=6', '-f', 'lavfi', '-i', 'color=red:s=40x40:r=15:d=6',
+    '-filter_complex', "[0][1]overlay=x='mod(n*12,260)':y=60,fps=30", '-pix_fmt', 'yuv420p', '-y', clip]);
+  const script = fileURLToPath(new URL('../analysis/analyze_video.py', import.meta.url));
+  await exec(python, [script, clip, clip, '--output', out, '--no-pose']);
+  const result = JSON.parse(await readFile(out, 'utf8'));
+  assert.equal(result.cadence.animationStepNativeFrames, 2, 'small local motion must not be mistaken for held frames');
+  assert.ok(result.motion.regionShare.top > 0.95, `motion is in the top third, got ${result.motion.regionShare.top}`);
+  assert.ok(result.motion.activeAreaRatio.median < 0.05, 'localized, not full-frame');
 });

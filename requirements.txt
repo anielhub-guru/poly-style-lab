@@ -1,6 +1,6 @@
 # Python 3.10-3.12 recommended: current yt-dlp needs 3.10+, mediapipe 0.10.x supports up to 3.12.
 # yt-dlp is deliberately not pinned to a date: YouTube changes weekly and old releases stop downloading.
 yt-dlp>=2025.10.14
-mediapipe==0.10.21
-opencv-python-headless>=4.10,<5
+# optional (see README): mediapipe==0.10.21
+# optional (see README): opencv-python-headless>=4.10,<5
 numpy>=1.26,<2

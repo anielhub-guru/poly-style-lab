@@ -26,13 +26,15 @@ except ImportError:  # pose is optional
     cv2 = None
     mp = None
 
-VERSION = 2
+VERSION = 3
 FPS = 30.0
 HOLD = 0.85        # mean abs gray difference (0-255, 160x90) below which the picture is "held"
 CUT_MIN = 22.0     # a cut needs at least this difference ...
 CUT_RATIO = 5.0    # ... and this many times the typical moving-frame difference
 MAX_GAP = 8        # frames of tracking loss after which a speed sample is not trusted
 BIN = 6            # frames per bin when correlating mouth and body (0.2 s)
+ACTIVE_PIXEL = 12  # gray-level change that counts a pixel as "moving" (landmark-free motion)
+ACTIVE_FRACTION = 0.002  # a frame also counts as changed when this share of pixels moved (small, local movement)
 
 POSE_GROUPS = {
     "head": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
@@ -86,17 +88,62 @@ def gray_frames(path, max_sec):
         process.wait()
 
 
+def landmark_free_motion(diffs, regions, cut_set, distinct, fps, duration):
+    """Where and how the picture moves, from frame differences only (works on cartoons; no models needed)."""
+    frames = [i for i in sorted(regions) if i not in cut_set]
+    if len(frames) < 8:
+        return None
+    rows = np.array([regions[i][0] for i in frames])
+    cols = np.array([regions[i][1] for i in frames])
+    share = lambda m: (m.sum(axis=0) / max(m.sum(), 1e-9)).tolist()
+    row_share, col_share = share(rows), share(cols)
+    previous = {distinct[k]: distinct[k - 1] for k in range(1, len(distinct))}
+    per_sec = np.array([diffs[i] / ((i - previous[i]) / fps) for i in frames])  # change per second, comparable across animation step
+    median = float(np.median(per_sec))
+    threshold = max(float(np.percentile(per_sec, 90)), 3 * median)
+    events = []
+    for i, value in zip(frames, per_sec):
+        if value >= threshold:
+            if events and i - events[-1]["frame"] <= max(3, round(0.15 * fps)):
+                events[-1]["value"] = max(events[-1]["value"], float(value))
+            else:
+                events.append({"frame": i, "value": float(value)})
+    return {
+        "regionShare": {"top": r(row_share[0]), "middle": r(row_share[1]), "bottom": r(row_share[2]),
+                        "left": r(col_share[0]), "center": r(col_share[1]), "right": r(col_share[2])},
+        "activeAreaRatio": summary([regions[i][2] for i in frames]),
+        "energyPerSec": summary(per_sec.tolist()),
+        "burstiness": r(float(np.percentile(per_sec, 95)) / median) if median > 0 else None,
+        "accents": {"count": len(events), "per10s": r(len(events) * 10 / duration, 2),
+                    "top": [{"timeSec": r(e["frame"] / fps, 2), "ratioToMedian": r(e["value"] / median, 2) if median > 0 else None} for e in sorted(events, key=lambda e: -e["value"])[:6]]},
+    }
+
+
 def pass_a(source, max_sec):
     fps = native_fps(source)
-    diffs, previous = [], None
+    diffs, actives, previous, regions = [], [], None, {}
     for frame in gray_frames(source, max_sec):
-        diffs.append(0.0 if previous is None else float(np.abs(frame - previous).mean()))
+        if previous is None:
+            diffs.append(0.0)
+            actives.append(0.0)
+        else:
+            delta = np.abs(frame - previous)
+            value = float(delta.mean())
+            active = float((delta >= ACTIVE_PIXEL).mean())
+            diffs.append(value)
+            actives.append(active)
+            if value >= HOLD or active >= ACTIVE_FRACTION:  # per-frame energy by thirds (rows/columns) and share of the frame that moved
+                grid = delta.reshape(90, 160)
+                regions[len(diffs) - 1] = ([float(grid[a:b].mean()) for a, b in ((0, 30), (30, 60), (60, 90))],
+                                           [float(grid[:, a:b].mean()) for a, b in ((0, 53), (53, 107), (107, 160))],
+                                           active)
         previous = frame
     frames = len(diffs)
     if frames < 6:
         raise RuntimeError("video is too short or unreadable")
     d = np.asarray(diffs[1:])
-    moving = d[d >= HOLD]
+    changed = np.array([v >= HOLD or a >= ACTIVE_FRACTION for v, a in zip(diffs[1:], actives[1:])])
+    moving = d[changed]
     typical = float(np.median(moving)) if moving.size else 0.0
     cut_threshold = max(CUT_MIN, CUT_RATIO * typical)
 
@@ -105,7 +152,7 @@ def pass_a(source, max_sec):
         if value >= cut_threshold and (not cuts or index - cuts[-1] > 2):
             cuts.append(index)
 
-    distinct = [0] + [i for i, v in enumerate(d, start=1) if v >= HOLD]
+    distinct = [0] + [i for i, flag in enumerate(changed, start=1) if flag]
     intervals = [int(x) for x in np.diff(distinct)]  # frames each picture stayed on screen
     shares = {}
     if len(intervals) >= 3:
@@ -117,6 +164,8 @@ def pass_a(source, max_sec):
         step = None
     holds = [x - 1 for x in intervals if x > 1]
 
+    motion = landmark_free_motion(diffs, regions, set(cuts), distinct, fps, frames / fps)
+
     boundaries = [0] + cuts + [frames]
     shot_lengths = [(b - a) / fps for a, b in zip(boundaries, boundaries[1:]) if b - a >= 3]
     longest = max(range(len(boundaries) - 1), key=lambda i: boundaries[i + 1] - boundaries[i])
@@ -126,11 +175,11 @@ def pass_a(source, max_sec):
         "cadence": {
             "animationStepNativeFrames": step, "estimatedContentFps": r(fps / step, 2) if step else None,
             "imageIntervalMs": summary([x / fps * 1000 for x in intervals]),
-            "intervalShare": shares, "duplicateFrameRatio": r(float((d < HOLD).sum()) / len(d)),
+            "intervalShare": shares, "duplicateFrameRatio": r(1.0 - float(changed.mean())),
             "holdFrames": summary(holds),
         },
         "shots": {"cuts": len(cuts), "cutsPerMinute": r(len(cuts) / duration * 60, 2), "lengthSec": summary(shot_lengths)},
-        "motionEnergy": summary(moving.tolist()),
+        "motionEnergy": summary(moving.tolist()), "motion": motion,
         "_typicalDiff": typical, "_cutThreshold": cut_threshold,
         "_fallbackTimeSec": (boundaries[longest] + boundaries[longest + 1]) / 2 / fps,
     }
@@ -195,9 +244,10 @@ def pass_b(normalized, cut_threshold, typical_diff, fallback_time):
             break
         small = cv2.cvtColor(cv2.resize(frame, (160, 90), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY).astype(np.int16)
         diff = 0.0 if previous is None else float(np.abs(small - previous).mean())
+        active = 0.0 if previous is None else float((np.abs(small - previous) >= ACTIVE_PIXEL).mean())
         previous = small
         cut = index > 0 and diff >= cut_threshold
-        held = index > 0 and diff < HOLD and not cut
+        held = index > 0 and diff < HOLD and active < ACTIVE_FRACTION and not cut
         if cut:
             prev_pos.clear(); prev_idx.clear(); prev_v.clear()
             last_ok = {g: False for g in POSE_GROUPS}

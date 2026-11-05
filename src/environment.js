@@ -20,7 +20,7 @@ export async function ytDlpPath() {
 /** Turn a raw yt-dlp failure into something fixable. */
 export function explainDownloadError(message) {
   const stale = /reloaded|sign in|unable to extract|nsig|player response|HTTP Error 4(03|29)|not a bot/i.test(message);
-  return stale ? `${message} — YouTube changed; update yt-dlp (needs Python 3.10+: \`uv venv --python 3.12 .venv && uv pip install -U -r requirements.txt\`), set YT_DLP to a current yt-dlp binary, or set COBALT_API_URL to a Cobalt instance as a fallback.` : message;
+  return stale ? `${message} — YouTube changed; update yt-dlp (needs Python 3.10+: \`uv venv --python 3.12 .venv && uv pip install -U -r requirements.txt\`), or set YT_DLP to a current yt-dlp binary.` : message;
 }
 
 /** Pick the best interpreter: the project venv with pose tracking, else any Python with numpy. */
@@ -41,7 +41,7 @@ export async function preflight({ remote = false } = {}) {
   const problems = [];
   if (!cached.ffmpeg) problems.push('ffmpeg is not on PATH (install it, e.g. `brew install ffmpeg`)');
   if (!cached.numpy) problems.push(`Python numpy is missing. ${SETUP}`);
-  if (remote && !cached.ytDlp && !process.env.COBALT_API_URL) problems.push(`yt-dlp is missing. ${SETUP}`);
+  if (remote && !cached.ytDlp) problems.push(`yt-dlp is missing. ${SETUP}`);
   if (problems.length) { cached = undefined; throw new Error(`Analysis toolchain incomplete: ${problems.join('; ')}.`); }
   return { ...cached, warnings: cached.pose ? [] : [`mediapipe/opencv not installed: pose tracking skipped; only cadence, cuts and motion energy were measured. ${SETUP}`] };
 }

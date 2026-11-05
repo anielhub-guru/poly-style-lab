@@ -17,8 +17,9 @@ The screenshot shown in the UI is automatically extracted from an analysed video
 ### Requirements
 
 - Node 18+ and **ffmpeg** on `PATH`.
-- Python with `numpy` for cadence and cut measurement. This is the minimum; a study still works and says what it skipped.
-- Optional but recommended: pose tracking (`opencv-python-headless` + `mediapipe`) for body-motion and speech-motion measurements, and `yt-dlp` for YouTube sources.
+- Python with `numpy` for cadence, cuts and landmark-free movement. This is the minimum and is enough for most studies; a study still works and says what it skipped.
+- `yt-dlp` for YouTube sources.
+- Optional, heavy (about 1 GB, Python ≤3.12) and only useful for live-action or realistic footage: pose tracking (`opencv-python-headless` + `mediapipe`) adds per-body-part speeds and speech-motion correlations. Install it with `uv pip install mediapipe opencv-python-headless`; without it those measurements are simply skipped.
 
 Recommended setup (Python 3.10–3.12; current yt-dlp no longer supports 3.9, and the mediapipe download is large):
 
@@ -27,8 +28,6 @@ uv venv --python 3.12 .venv && uv pip install -r requirements.txt   # or: python
 ```
 
 `YT_DLP=/path/to/yt-dlp` points the tool at any yt-dlp binary. yt-dlp is intentionally not pinned: YouTube changes weekly and old releases fail with errors such as "The page needs to be reloaded". If downloads fail, update yt-dlp first.
-
-**Cobalt fallback (optional).** If yt-dlp fails on a video, the tool retries it through a [Cobalt](https://github.com/imputnet/cobalt) API instance: `COBALT_API_URL=http://localhost:9000/` and, if the instance needs it, `COBALT_API_KEY=...`. The public `api.cobalt.tools` rejects scripted requests (it needs a key or browser session), so self-host one or use a key. Cobalt cannot clip, so it downloads the whole file (capped at 60 MB; Shorts only), and the study still measures just the first seconds. Single-video URLs skip channel listing entirely, so they work through Cobalt alone. Channel listing still needs yt-dlp.
 
 The UI follows PolyStudio’s three-panel workspace language because it is a complementary inspector, not the main automation surface.
 
@@ -84,6 +83,7 @@ The motion blueprint records, as distributions across videos (never zero-filled 
 
 - animation step (ones/twos/threes) and drawings per second, measured on the **native** frame grid, plus duplicate-frame ratio and hold lengths;
 - cut rate and shot-length distribution (landmark-free, so it works on cartoons);
+- **landmark-free movement** (numpy only, works on cartoons and needs no install): which third of the frame the movement is in, how much of the frame changes at once (localized/limited animation vs full-frame), how punchy or steady it is, and sharp accents per 10 s;
 - speed and acceleration of head, shoulders, hands, torso, hips and legs in shoulder-widths per second, computed only on frames where the picture changed;
 - mouth/head, mouth/shoulder and mouth/hand motion correlation and head speed while speaking versus quiet;
 - sharp snap accents per 10 s (merged across body parts; cuts and tracking dropouts excluded);
