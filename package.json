@@ -1,0 +1,18 @@
+{
+  "name": "poly-style-lab",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Author measured visual style blueprints for Localy Studio and PolyStudio.",
+  "bin": {
+    "poly-style-lab": "bin/poly-style-lab.js"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test tests/*.test.js",
+    "mcp": "node mcp/server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

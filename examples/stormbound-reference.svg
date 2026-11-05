@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#70a6bb"/><stop offset="1" stop-color="#d9f1ee"/></linearGradient>
+    <linearGradient id="ground" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#b7a37b"/><stop offset="1" stop-color="#786c57"/></linearGradient>
+  </defs>
+  <rect width="1280" height="720" fill="url(#sky)"/>
+  <path d="M0 420 160 230l130 118 205-236 190 254 165-178 164 205 146-147 120 134v340H0Z" fill="#526f75" opacity=".72"/>
+  <path d="M0 470c220-42 402-16 588 2 248 24 418-22 692-72v320H0Z" fill="url(#ground)"/>
+  <path d="m220 448 450-72M152 492l530-61M92 542l576-62" stroke="#d9f1ee" stroke-width="10" opacity=".72"/>
+  <g stroke="#17212b" stroke-width="16" stroke-linecap="round" stroke-linejoin="round">
+    <path d="m804 262-43 115-74 92M771 381l123 18 88-74M744 452l-74 146M733 456l98 120" fill="none"/>
+    <path d="m754 330 82-16 65 98-142 44-62-79Z" fill="#e66a2c"/>
+    <circle cx="810" cy="245" r="54" fill="#c68d6c"/>
+    <path d="m770 232 33-55 66 30-18 54-44-28Z" fill="#17212b"/>
+    <path d="m790 251 38 6"/>
+    <path d="m894 398 151 53"/>
+  </g>
+  <path d="m1028 436 164 19-141 32Z" fill="#d9f1ee" opacity=".85"/>
+  <circle cx="991" cy="327" r="15" fill="#d9f1ee"/><circle cx="1019" cy="305" r="8" fill="#d9f1ee"/>
+  <text x="42" y="60" fill="#17212b" font-family="sans-serif" font-size="20" font-weight="700" letter-spacing="4">ORIGINAL ACTION REFERENCE · AXIS / SILHOUETTE / PALETTE</text>
+</svg>

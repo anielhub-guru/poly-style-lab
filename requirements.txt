@@ -1,0 +1,4 @@
+yt-dlp==2025.10.14
+mediapipe==0.10.21
+opencv-python-headless>=4.10,<5
+numpy>=1.26,<2

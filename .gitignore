@@ -1,0 +1,4 @@
+.venv/
+workspaces/
+*.log
+.DS_Store

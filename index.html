@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101713">
+  <title>Poly Style Lab</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="grain" aria-hidden="true"></div>
+  <header class="topbar">
+    <a class="brand" href="#top" aria-label="Poly Style Lab home"><span class="brand-mark">PS</span><span>Poly<span class="brand-muted">Style Lab</span></span></a>
+    <nav class="app-tab-nav" aria-label="PolyStudio applications">
+      <span class="app-tab">Character</span><span class="app-tab">Pose</span><span class="app-tab">Studio</span><span class="app-tab active">Style Lab</span>
+    </nav>
+    <div class="status"><span class="pulse"></span><span id="completion">Blueprint 100% specified</span></div>
+    <div class="actions">
+      <button class="ghost" id="copyPrompt">Copy master prompt</button>
+      <button class="primary" id="exportBlueprint">Export blueprint <span>↓</span></button>
+      <button class="square" id="moreButton" aria-label="More export options" aria-expanded="false">•••</button>
+      <div class="menu" id="exportMenu" hidden>
+        <button id="exportPack">PolyStudio pack.json</button>
+        <button id="exportGuide">Style guide.md</button>
+      </div>
+    </div>
+  </header>
+
+  <main id="top">
+    <aside class="rail" aria-label="Blueprint sections">
+      <p class="eyebrow">Blueprint anatomy</p>
+      <nav id="sectionNav"></nav>
+      <div class="legend">
+        <p><span class="legend-dot locked"></span>Machine contract</p>
+        <p><span class="legend-dot editable"></span>Human direction</p>
+      </div>
+    </aside>
+
+    <section class="workspace">
+      <div class="workspace-head">
+        <div>
+          <p class="eyebrow">Localy style blueprint / v1</p>
+          <input class="title-input" id="styleName" aria-label="Style name" value="Stormbound Shōnen">
+          <textarea id="intent" aria-label="Style intent" rows="2">High-clarity hand-drawn action with tactical staging, elastic impact beats and emotionally legible close-ups.</textarea>
+        </div>
+        <label class="preset-select">Starting system
+          <select id="preset">
+            <option value="stormbound-shonen">Stormbound Shōnen</option>
+            <option value="quiet-editorial">Quiet Editorial</option>
+          </select>
+        </label>
+      </div>
+
+      <section class="panel active" data-section="visual" aria-labelledby="visual-title">
+        <div class="panel-title"><span>01</span><div><h2 id="visual-title">Visual DNA</h2><p>What the frame is made of before subject matter enters it.</p></div></div>
+        <div class="field-grid two">
+          <label>Rendering medium<input id="medium" type="text"></label>
+          <label>Canvas<select id="aspectRatio"><option>16:9</option><option>9:16</option><option>1:1</option></select></label>
+        </div>
+        <div class="meter-grid">
+          <label><span>Line weight <output id="lineWeightOut"></output></span><input id="lineWeight" type="range" min="0.2" max="5" step="0.1"></label>
+          <label><span>Line variation <output id="lineVariationOut"></output></span><input id="lineVariation" type="range" min="0" max="100"></label>
+          <label><span>Surface texture <output id="textureOut"></output></span><input id="texture" type="range" min="0" max="100"></label>
+          <label><span>Colour saturation <output id="saturationOut"></output></span><input id="saturation" type="range" min="0" max="100"></label>
+          <label><span>Tonal contrast <output id="contrastOut"></output></span><input id="contrast" type="range" min="0" max="100"></label>
+        </div>
+        <div class="subhead"><div><h3>Palette allocation</h3><p>Shares are normalized to 100% in the export.</p></div><span id="paletteTotal">100%</span></div>
+        <div class="palette" id="palette"></div>
+      </section>
+
+      <section class="panel reference-panel" data-section="reference" aria-labelledby="reference-title">
+        <div class="panel-title"><span>00</span><div><h2 id="reference-title">Channel study</h2><p>Download a representative set, inspect every frame at 30 FPS, and derive patterns from measurements.</p></div></div>
+        <div class="source-console">
+          <label class="source-url">YouTube channel, playlist, video, or local folder<textarea id="sourceInput" rows="3" placeholder="https://youtube.com/@channel/videos"></textarea></label>
+          <label class="video-count">Study size<input id="videoCount" type="number" min="10" max="20" value="15"><em>videos</em></label>
+          <button class="primary analyse-button" id="startAnalysis" type="button">Start measured study</button>
+          <div class="analysis-clock"><b>30</b><span>FPS<br>ANALYSIS CLOCK</span></div>
+        </div>
+        <div class="analysis-progress" id="analysisProgress">
+          <span class="analysis-state" id="analysisState">AWAITING SOURCE</span>
+          <div><i id="analysisBar"></i></div>
+          <p id="analysisDetail">The review image will be extracted automatically from the material being analysed.</p>
+        </div>
+        <figure class="evidence-view" id="evidenceView" hidden>
+          <img id="evidenceImage" alt="Automatically extracted frame from the video being analysed">
+          <figcaption><span id="evidenceTitle"></span><b id="evidenceTime"></b></figcaption>
+        </figure>
+      </section>
+
+      <section class="panel" data-section="camera" aria-labelledby="camera-title">
+        <div class="panel-title"><span>02</span><div><h2 id="camera-title">Camera & light</h2><p>Physical values keep one shot compatible with the next.</p></div></div>
+        <div class="field-grid three">
+          <label>Default lens<input id="focalLength" type="number" min="14" max="200"><em>mm</em></label>
+          <label>Camera height<input id="cameraHeight" type="number" min="0.1" max="12" step="0.05"><em>m</em></label>
+          <label>Horizon<input id="horizon" type="number" min="0" max="100"><em>%</em></label>
+          <label>Frame rate<input id="frameRate" type="number" min="12" max="60"><em>fps</em></label>
+          <label>Animate on<input id="animationStep" type="number" min="1" max="4"><em>frames</em></label>
+          <label>Shutter angle<input id="shutterAngle" type="number" min="45" max="360"><em>°</em></label>
+          <label>Key angle<input id="keyAngle" type="number" min="-180" max="180"><em>°</em></label>
+          <label>Key softness<input id="keySoftness" type="number" min="0" max="100"><em>%</em></label>
+          <label>Fill : key<input id="fillRatio" type="number" min="0" max="1" step="0.01"><em>ratio</em></label>
+        </div>
+        <div class="light-diagram" aria-label="Lighting diagram">
+          <div class="subject">SUBJECT</div><span class="key-ray">KEY</span><span class="fill-ray">FILL</span><span class="rim-ray">RIM</span>
+        </div>
+      </section>
+
+      <section class="panel" data-section="world" aria-labelledby="world-title">
+        <div class="panel-title"><span>03</span><div><h2 id="world-title">Character & world</h2><p>Rules that preserve identity across new scenes and subjects.</p></div></div>
+        <div class="text-cards">
+          <label><span>Silhouette rule</span><textarea id="characterSilhouette"></textarea></label>
+          <label><span>Body proportions</span><textarea id="characterProportions"></textarea></label>
+          <label><span>Face language</span><textarea id="characterFaces"></textarea></label>
+          <label><span>Costume logic</span><textarea id="characterCostume"></textarea></label>
+          <label><span>Environment geometry</span><textarea id="environmentGeometry"></textarea></label>
+          <label><span>Detail falloff</span><textarea id="environmentDetail"></textarea></label>
+          <label><span>Atmosphere</span><textarea id="environmentAtmosphere"></textarea></label>
+        </div>
+      </section>
+
+      <section class="panel" data-section="motion" aria-labelledby="motion-title">
+        <div class="panel-title"><span>04</span><div><h2 id="motion-title">Motion signature</h2><p>Time measured in frames, not adjectives.</p></div></div>
+        <label class="wide-field">Cadence<textarea id="motionCadence"></textarea></label>
+        <div class="frame-ruler">
+          <div class="ruler-track" id="rulerTrack"></div>
+          <div class="ruler-labels"><span>ANTICIPATE</span><span>CONTACT</span><span>SETTLE</span></div>
+        </div>
+        <div class="field-grid four">
+          <label>Anticipation<input id="anticipationFrames" type="number" min="0" max="48"><em>frames</em></label>
+          <label>Impact<input id="impactFrames" type="number" min="1" max="12"><em>frames</em></label>
+          <label>Settle<input id="settleFrames" type="number" min="0" max="48"><em>frames</em></label>
+          <label>Smear<input id="smearFrames" type="number" min="0" max="8"><em>frames</em></label>
+        </div>
+      </section>
+
+      <section class="panel" data-section="shots" aria-labelledby="shots-title">
+        <div class="panel-title"><span>05</span><div><h2 id="shots-title">Shot grammar</h2><p>Reusable shot blueprints Localy can select by narrative purpose.</p></div></div>
+        <div id="shots" class="shots"></div>
+        <button class="add-shot" id="addShot">＋ Add shot blueprint</button>
+      </section>
+
+      <section class="panel" data-section="guardrails" aria-labelledby="guardrails-title">
+        <div class="panel-title"><span>06</span><div><h2 id="guardrails-title">Continuity & exclusions</h2><p>Hard constraints stop style drift and accidental imitation.</p></div></div>
+        <div class="list-editor"><h3>Continuity locks</h3><div id="continuity"></div><button data-add-list="continuity">＋ Add lock</button></div>
+        <div class="list-editor danger"><h3>Never generate</h3><div id="avoid"></div><button data-add-list="avoid">＋ Add exclusion</button></div>
+      </section>
+
+      <section class="panel handoff-panel" data-section="handoff" aria-labelledby="handoff-title">
+        <div class="panel-title"><span>07</span><div><h2 id="handoff-title">Use it with an agent</h2><p>The UI is optional. Codex, another MCP client, or a shell can run the full workflow.</p></div></div>
+        <ol class="workflow-steps">
+          <li><b>Point to a channel</b><span>The agent downloads 10–20 videos and normalizes each to a 30 FPS analysis clock.</span></li>
+          <li><b>Measure the set</b><span>Pose, face, hands, holds, skips, acceleration and co-speech motion are aggregated across videos.</span></li>
+          <li><b>Export the PolyStudio pack</b><span>Install the generated folder under <code>PolyStudio/packs/&lt;style-id&gt;/</code>.</span></li>
+          <li><b>Generate with the style</b><span>Agents select its shot grammar and apply continuity locks to every shot.</span></li>
+        </ol>
+        <div class="command-card"><div><span>Codex handoff</span><button id="copyCodex" type="button">Copy</button></div><code id="codexCommand">Use Poly Style Lab through MCP. Load this blueprint, validate it, export its PolyStudio story-format pack, install the pack, and use its shot grammar and continuity locks for the next story.</code></div>
+        <div class="command-card"><div><span>CLI</span><button id="copyCli" type="button">Copy</button></div><code id="cliCommand">poly-style-lab style_validate --input '{"blueprint":"./style-blueprint.json"}' --json</code></div>
+        <div class="handoff-actions"><button class="primary" id="exportSheet">Download visual reference sheet</button><button id="exportPackInline">Export PolyStudio pack</button></div>
+      </section>
+    </section>
+
+    <aside class="preview">
+      <div class="preview-sticky">
+        <div class="preview-head"><div><p class="eyebrow">Live machine output</p><h2>Blueprint dossier</h2></div><span id="schemaBadge">v1</span></div>
+        <div class="reference-thumb" id="referenceThumbWrap" hidden><img id="referenceThumb" alt="Attached style reference"><span>PRIMARY REFERENCE</span></div>
+        <div class="frame-preview" id="framePreview">
+          <div class="safe safe-action"></div><div class="safe safe-title"></div>
+          <div class="sun"></div><div class="mountain one"></div><div class="mountain two"></div>
+          <div class="figure"><i></i></div><div class="motion-streaks"></div>
+          <div class="frame-meta"><span id="previewLens">35 MM</span><span id="previewAspect">16:9</span><span id="previewFps">24 FPS / 2s</span></div>
+        </div>
+        <div class="spec-strip" id="specStrip"></div>
+        <div class="palette-preview" id="palettePreview"></div>
+        <div class="prompt-preview"><div><h3>Compiled master prompt</h3><button id="expandPrompt">Expand</button></div><p id="promptText"></p></div>
+        <div class="validation" id="validation"><span>✓</span><p><b>Ready for Localy</b><br>All required machine fields are present.</p></div>
+      </div>
+    </aside>
+  </main>
+
+  <dialog id="promptDialog"><div><p class="eyebrow">Compiled contract</p><h2>Master prompt</h2><button aria-label="Close" id="closeDialog">×</button></div><pre id="fullPrompt"></pre><button class="primary" id="copyDialogPrompt">Copy prompt</button></dialog>
+  <div class="toast" id="toast" role="status"></div>
+  <script type="module" src="src/app.js"></script>
+</body>
+</html>
