@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure animation cadence, cuts and body motion for ONE short video.
+"""Measure animation cadence, cuts, body motion and the visual look (see look.py) for ONE short video.
 
 Pass A reads the SOURCE at its native frame rate (tiny gray frames, via ffmpeg) so that
 animating on ones/twos/threes and hard cuts are measured on the real frame grid.
@@ -19,6 +19,9 @@ from pathlib import Path
 
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import look  # noqa: E402  (colour, edge lines, softness and 2D effects; numpy only)
+
 try:
     import cv2
     import mediapipe as mp
@@ -26,7 +29,7 @@ except ImportError:  # pose is optional
     cv2 = None
     mp = None
 
-VERSION = 3
+VERSION = 4
 FPS = 30.0
 HOLD = 0.85        # mean abs gray difference (0-255, 160x90) below which the picture is "held"
 CUT_MIN = 22.0     # a cut needs at least this difference ...
@@ -372,6 +375,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--max-sec", type=float, default=45)
     parser.add_argument("--no-pose", action="store_true")
+    parser.add_argument("--look-sheet", type=Path, help="write a frame | edges evidence sheet (PPM) here")
+    parser.add_argument("--no-look", action="store_true")
     args = parser.parse_args()
 
     result = pass_a(args.source, args.max_sec)
@@ -382,6 +387,13 @@ def main():
     else:
         result.update({"pose": {"available": False, "usable": False, "reason": "pose tracking not installed or disabled"}, "bodyMotion": None, "coSpeech": None, "snapEvents": None,
                        "representativeFrame": {"frame": int(fallback * FPS), "timeSec": r(fallback, 2)}})
+    if args.no_look:
+        result["look"] = {"available": False, "reason": "disabled"}
+    else:
+        try:
+            result["look"] = look.analyze(args.normalized, args.max_sec, args.look_sheet)
+        except Exception as error:  # the look is an extra; cadence and motion must survive its failure
+            result["look"] = {"available": False, "reason": f"{type(error).__name__}: {error}"}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, separators=(",", ":")), encoding="utf-8")
 

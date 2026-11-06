@@ -87,9 +87,12 @@ The motion blueprint records, as distributions across videos (never zero-filled 
 - speed and acceleration of head, shoulders, hands, torso, hips and legs in shoulder-widths per second, computed only on frames where the picture changed;
 - mouth/head, mouth/shoulder and mouth/hand motion correlation and head speed while speaking versus quiet;
 - sharp snap accents per 10 s (merged across body parts; cuts and tracking dropouts excluded);
-- per-video confidence, one evidence frame per video, and explicit warnings.
+- **look** (numpy only, colour frames at 8/s, longest side 288 px): a merged palette with shares; saturation, brightness and contrast; warm highlights vs cool shadows; the sky gradient (top vs lower colour); **edges** (outline coverage: the share of strong edges that sit on a thin dark line, 0.98 for a drawn outline and 0 for plain colour shapes in the tests; edge width, where a hard step reads about 2 px and blur reads above 3 px); **softness** (background sharpness as a multiple of the subject's, vignette); **2D effects** (soft, low-saturation areas that change over at least 0.4 s, such as smoke, dust or cloud puffs: events per 10 s, size, duration) and **backdrop** (how still the top of the frame stays while the rest moves, a sign of a flat plate). Each study also gets plain-language verdicts, look rules in the pack guidance and a suggested PolyStudio `brief.look`;
+- per-video confidence, evidence images (the frame, an edge sheet with strong edges in white and thin dark lines in red, and the strongest effect moments) and explicit warnings.
 
 ## Limitations
+
+- The look numbers are measurements of the picture, not a style classifier. Outline coverage and edge width are reliable; the 2D-effect and backdrop figures are heuristics that also fire on fades inside a scene, soft shadows and focus pulls, so check the effect evidence frames before trusting them. Palette and edge numbers describe the rendered frames, including any watermark.
 
 - Pose tracking is trained on real people. Stylised or very small figures may not track; those videos still contribute cadence and cutting, are excluded from body-motion statistics, and the warnings say so.
 - The sample is the newest ≤120 listed uploads, spread evenly; it describes recent style, not a creator's whole history.

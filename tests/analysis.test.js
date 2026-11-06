@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { evenlySpaced, selectEntries, shortsUrl, singleVideoId } from '../src/source-catalog.js';
-import { aggregateMeasurements, distribution, toMotionPack } from '../src/style-analysis.js';
+import { aggregateLook, aggregateMeasurements, distribution, lookVerdicts, mergePalettes, suggestLook, toMotionPack } from '../src/style-analysis.js';
 
 const exec = promisify(execFile);
 const GROUPS = ['head', 'shoulders', 'hands', 'torso', 'hips', 'legs'];
@@ -51,7 +51,7 @@ test('videos without usable pose still count for cadence but not for body motion
   assert.equal(blueprint.confidence.poseUsableVideos, 2);
   assert.ok(blueprint.warnings.some(line => line.includes('1 of 3')));
   assert.equal(blueprint.measuredPatterns.coSpeechMotion.mouthShoulderCorrelation.videos, 0);
-  assert.ok(blueprint.summary.length <= 8, 'summary stays compact for agents');
+  assert.ok(blueprint.summary.length <= 10, 'summary stays compact for agents');
   assert.match(blueprint.summary.join('\n'), /Movement: 70% top \/ 20% middle \/ 10% bottom third; localized \(limited animation\)/);
   assert.ok(JSON.stringify(blueprint).length < 20_000, 'blueprint stays compact');
 });
@@ -127,4 +127,102 @@ test('landmark-free motion finds WHERE a small local movement happens, and still
   assert.equal(result.cadence.animationStepNativeFrames, 2, 'small local motion must not be mistaken for held frames');
   assert.ok(result.motion.regionShare.top > 0.95, `motion is in the top third, got ${result.motion.regionShare.top}`);
   assert.ok(result.motion.activeAreaRatio.median < 0.05, 'localized, not full-frame');
+});
+
+// ---- look: colour, edges, softness and 2D effects
+const lookStat = median => ({ videos: 3, median, p10: median, p90: median });
+const lookMeasurement = (id, over = {}) => ({
+  ...measurement(id),
+  look: {
+    available: true, sampleFps: 8, frames: 200,
+    colour: { saturationMean: 0.4, saturationP90: 0.8, brightnessMean: 0.6, contrast: 0.7, highlightWarmth: 0.1, shadowWarmth: -0.05, warmHighlightCoolShadow: 0.15, skyTop: '#2f55a3', skyLower: '#ffd3ae', skyGradient: 0.3,
+      palette: [{ hex: '#3a76cf', share: 0.4 }, { hex: '#f2b155', share: 0.3 }, { hex: '#080e23', share: 0.3 }] },
+    edges: { edgeDensity: 0.05, inkLineRatio: 0.01, inkShareOfEdges: 0.2, outlineCoverage: 0.4, edgeWidthPx: 2.0, edgeWidthPctOfFrame: 0.7, frameLongSidePx: 288 },
+    softness: { sharpness: 5, backgroundSharpnessRatio: 0.1, vignette: 1 },
+    effects2d: { eventsPer10s: 2.5, events: { count: 3, areaShare: { median: 0.08, peak: 0.2 }, durationSec: 1.2, lightShare: 0.5 }, top: [{ timeSec: 5, areaShare: 0.2, durationSec: 1.5, centerY: 0.5 }] },
+    backdrop: { topStillness: 0.9, smoothTopShare: 0.85, samples: 100 }, sheet: { timeSec: 3 }, ...over,
+  },
+});
+
+test('palettes from several videos merge close colours and re-normalise to 100%', () => {
+  const merged = mergePalettes([[{ hex: '#3a76cf', share: 0.5 }, { hex: '#f2b155', share: 0.5 }], [{ hex: '#3b77d0', share: 0.6 }, { hex: '#080e23', share: 0.4 }]]);
+  assert.equal(merged.length, 3, 'the two blues are one swatch');
+  assert.equal(merged[0].hex, '#3b77d0');
+  assert.equal(Math.round(merged.reduce((sum, swatch) => sum + swatch.share, 0)), 100);
+});
+
+test('look verdicts separate no-outline, blur, still backdrop and frequent effects from their opposites', () => {
+  const soft = aggregateLook([lookMeasurement('a'), lookMeasurement('b'), lookMeasurement('c')]);
+  assert.equal(soft.verdict.outlines, 'none');
+  assert.equal(soft.verdict.edges, 'crisp');
+  assert.match(soft.verdict.background, /much softer/);
+  assert.match(soft.verdict.backdrop, /stays almost still/);
+  assert.equal(soft.verdict.effects, 'frequent');
+  const inked = aggregateLook([lookMeasurement('a', { edges: { ...lookMeasurement('a').look.edges, outlineCoverage: 0.95, edgeWidthPx: 3.6 }, softness: { sharpness: 5, backgroundSharpnessRatio: 1, vignette: 1 }, effects2d: { ...lookMeasurement('a').look.effects2d, eventsPer10s: 0 }, backdrop: { topStillness: 0.1, smoothTopShare: 0.2 } })]);
+  assert.equal(inked.verdict.outlines, 'drawn outline');
+  assert.equal(inked.verdict.edges, 'blurry');
+  assert.equal(inked.verdict.background, 'as sharp as the subject');
+  assert.equal(inked.verdict.backdrop, 'moves with the scene');
+  assert.equal(inked.verdict.effects, 'rare');
+  assert.equal(lookVerdicts({}).outlines, 'unknown');
+});
+
+test('the suggested PolyStudio look stays inside PolyStudio\'s validated ranges', () => {
+  const look = aggregateLook([lookMeasurement('a')]).suggestedLook;
+  for (const key of ['skyTop', 'skyHorizon', 'sun', 'hemiSky', 'hemiGround']) assert.match(look[key], /^#[0-9a-f]{6}$/, key);
+  assert.ok(look.sunIntensity >= 0 && look.sunIntensity <= 6);
+  assert.ok(look.exposure >= 0.5 && look.exposure <= 2);
+  assert.ok(look.fog >= 0 && look.fog <= 0.05 && look.fog > 0.01, `a much softer background gives haze, got ${look.fog}`);
+  assert.equal(look.skyTop, '#2f55a3');
+  assert.equal(aggregateLook([lookMeasurement('a', { colour: { ...lookMeasurement('a').look.colour, palette: [{ hex: '#7f9b61', share: 0.5 }, { hex: '#080e23', share: 0.5 }] } })]).suggestedLook.sun, '#fff5e0', 'a green or blue swatch is never the sun');
+  assert.deepEqual(suggestLook({}).sunIntensity > 0, true, 'works with nothing measured');
+});
+
+test('a study with look measurements adds colour, edge and effect lines, look rules and stays compact', () => {
+  const blueprint = aggregateMeasurements([lookMeasurement('a'), lookMeasurement('b'), lookMeasurement('c')], catalog);
+  const text = blueprint.summary.join('\n');
+  assert.match(text, /Colour: saturation 40%/);
+  assert.match(text, /Edges: outlines none/);
+  assert.match(text, /2D effects: frequent/);
+  const guidance = toMotionPack(blueprint).format.guidance;
+  assert.match(guidance, /No outlines: separate shapes by colour and value/);
+  assert.match(guidance, /Suggested PolyStudio brief\.look: \{/);
+  assert.ok(JSON.stringify(blueprint).length < 20_000);
+  assert.equal(aggregateMeasurements([measurement('a')], catalog).measuredPatterns.look, null, 'older measurements without a look still aggregate');
+});
+
+const clipFrom = async (name, filter, extra = []) => {
+  const dir = await mkdtemp(join(tmpdir(), 'psl-look-')), clip = join(dir, `${name}.mp4`);
+  await exec('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=c=0xa8d4f0:s=320x568:r=10:d=4', ...extra, '-filter_complex', filter, '-map', '[o]', '-pix_fmt', 'yuv420p', '-y', clip]);
+  return { dir, clip };
+};
+const SHAPES = 'drawbox=x=60:y=120:w=120:h=200:color=0xd9482b:t=fill,drawbox=x=190:y=300:w=100:h=140:color=0x2fa84f:t=fill';
+const lookOf = async (clip, dir) => {
+  const script = fileURLToPath(new URL('../analysis/analyze_video.py', import.meta.url)), out = join(dir, 'out.json');
+  await exec(python, [script, clip, clip, '--output', out, '--no-pose', '--look-sheet', join(dir, 'sheet.ppm')]);
+  return JSON.parse(await readFile(out, 'utf8')).look;
+};
+
+test('the look pass tells a drawn outline from plain colour shapes, and blur from crisp edges', { skip: !(python && ffmpeg) && 'needs ffmpeg and numpy' }, async () => {
+  const plain = await clipFrom('plain', `[0:v]${SHAPES}[o]`);
+  const outlined = await clipFrom('outlined', `[0:v]${SHAPES},drawbox=x=60:y=120:w=120:h=200:color=black:t=4,drawbox=x=190:y=300:w=100:h=140:color=black:t=4[o]`);
+  const blurred = await clipFrom('blurred', `[0:v]${SHAPES},gblur=sigma=3[o]`);
+  const [a, b, c] = [await lookOf(plain.clip, plain.dir), await lookOf(outlined.clip, outlined.dir), await lookOf(blurred.clip, blurred.dir)];
+  assert.ok(a.available && b.available && c.available);
+  assert.ok(a.edges.outlineCoverage < 0.3, `plain shapes have no outline, got ${a.edges.outlineCoverage}`);
+  assert.ok(b.edges.outlineCoverage > 0.8, `outlined shapes are outlined, got ${b.edges.outlineCoverage}`);
+  assert.ok(a.edges.edgeWidthPx < 2.5 && c.edges.edgeWidthPx > 3.2, `crisp ${a.edges.edgeWidthPx}px vs blurred ${c.edges.edgeWidthPx}px`);
+  assert.match(a.colour.skyTop, /^#[0-9a-f]{6}$/);
+  assert.ok(a.colour.palette.some(swatch => swatch.hex === '#a8d4f0' || swatch.share > 0.3), 'palette finds the dominant colour');
+  const sheet = (await readFile(join(plain.dir, 'sheet.ppm'))).subarray(0, 2).toString();
+  assert.equal(sheet, 'P6', 'the evidence sheet is written');
+});
+
+test('the look pass finds a soft smoke-like blob that fades in and out, and nothing in a still scene', { skip: !(python && ffmpeg) && 'needs ffmpeg and numpy' }, async () => {
+  const still = await clipFrom('still', `[0:v]${SHAPES},format=yuv420p[o]`);
+  const smoke = await clipFrom('smoke', `[1:v]format=rgba,fade=t=in:st=1:d=1:alpha=1,fade=t=out:st=2.2:d=1:alpha=1,gblur=sigma=14[blob];[0:v]${SHAPES}[b];[b][blob]overlay=60:200:format=auto[o]`, ['-f', 'lavfi', '-i', 'color=c=0x404040:s=200x200:r=10:d=4']);
+  const [quiet, puff] = [await lookOf(still.clip, still.dir), await lookOf(smoke.clip, smoke.dir)];
+  assert.equal(quiet.effects2d.eventsPer10s, 0);
+  assert.ok(puff.effects2d.events.count >= 1, 'the fading blob is one event');
+  assert.ok(puff.effects2d.events.durationSec >= 1.5 && puff.effects2d.events.areaShare.median > 0.05);
 });
