@@ -22,6 +22,7 @@
       <div class="menu" id="exportMenu" hidden>
         <button id="exportPack">PolyStudio pack.json</button>
         <button id="exportGuide">Style guide.md</button>
+        <button id="exportAikiScene">AikiStudio scene.aikiscene</button>
       </div>
     </div>
   </header>
@@ -73,6 +74,7 @@
         <div class="source-console">
           <label class="source-url">YouTube channel (its Shorts), shorts or video URL, or local folder<textarea id="sourceInput" rows="3" placeholder="https://www.youtube.com/@channel"></textarea></label>
           <label class="video-count">Study size<input id="videoCount" type="number" min="1" max="20" value="12"><em>videos · 10–20 best</em></label>
+          <label>Export quality<select id="reconstructionQuality"><option value="standard">Standard · recommended</option><option value="high">High</option><option value="ultra">Ultra</option></select></label>
           <button class="primary analyse-button" id="startAnalysis" type="button">Start measured study</button>
           <div class="analysis-clock"><b>30</b><span>FPS<br>ANALYSIS CLOCK</span></div>
         </div>
@@ -84,6 +86,10 @@
         <figure class="evidence-view" id="evidenceView" hidden>
           <img id="evidenceImage" alt="Automatically extracted frame from the video being analysed">
           <figcaption><span id="evidenceTitle"></span><b id="evidenceTime"></b></figcaption>
+        </figure>
+        <figure class="reconstruction-view" id="reconstructionView" hidden>
+          <img id="reconstructionImage" alt="Automatically measured vector reconstruction">
+          <figcaption><span>Measured Three.js/SVG reconstruction</span><b id="reconstructionMetrics"></b></figcaption>
         </figure>
       </section>
 

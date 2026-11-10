@@ -54,6 +54,10 @@ function init() {
   });
   $('#exportPack').addEventListener('click', exportPack);
   $('#exportGuide').addEventListener('click', () => download('style-guide.md', styleGuideMarkdown(normalizeBlueprint(state)), 'text/markdown'));
+  $('#exportAikiScene').addEventListener('click', async () => {
+    if (!analysisResult?.aikiSceneUrl) return toast('Run a measured channel study first');
+    download(`${slugify(state.name)}.aikiscene`, await (await fetch(analysisResult.aikiSceneUrl)).text(), 'application/json');
+  });
   $('#exportSheet').addEventListener('click', () => download(`${slugify(state.name)}.reference-sheet.svg`, referenceSheetSvg(normalizeBlueprint(state)), 'image/svg+xml'));
   $('#exportPackInline').addEventListener('click', exportPack);
   $('#copyCodex').addEventListener('click', () => copyText($('#codexCommand').textContent, 'Codex handoff copied'));
@@ -146,7 +150,7 @@ async function runStudy() {
   const setProgress = (label, percent, detail) => { $('#analysisState').textContent = label; $('#analysisBar').style.width = `${percent}%`; $('#analysisDetail').textContent = detail; };
   $('#analysisProgress').classList.add('running'); setProgress('STARTING', 4, 'Checking tools and listing videos…');
   try {
-    const start = await fetch('/api/analyze', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source, videoCount: Number($('#videoCount').value) || 12, name: state.name }) });
+    const start = await fetch('/api/analyze', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source, videoCount: Number($('#videoCount').value) || 12, reconstructionQuality: $('#reconstructionQuality').value, name: state.name }) });
     const started = await start.json();
     if (!start.ok) throw new Error(started.error || 'Could not start the study');
     let status, failures = 0;
@@ -156,7 +160,7 @@ async function runStudy() {
       if (status.state === 'running') setProgress('ANALYSIS RUNNING', status.total ? Math.max(6, Math.round(status.done / status.total * 100)) : 6, status.message || 'Working…');
     } while (!status || status.state === 'running');
     if (status.state !== 'done') throw new Error(status.error || 'Analysis failed');
-    const result = analysisResult = { ...status.result, workspaceUrl: status.workspaceUrl, evidenceUrl: status.evidenceUrl };
+    const result = analysisResult = { ...status.result, workspaceUrl: status.workspaceUrl, evidenceUrl: status.evidenceUrl, reconstructionUrl: status.reconstructionUrl, reconstructionBlueprintUrl: status.reconstructionBlueprintUrl, aikiSceneUrl: status.aikiSceneUrl };
     const skipped = result.skipped?.length ? ` · ${result.skipped.length} skipped` : '';
     setProgress('MEASURED BLUEPRINT READY', 100, `${result.videosAnalysed} videos analysed${skipped}. ${result.headline.slice(0, 2).join(' ')}${result.warnings?.length ? ` ⚠ ${result.warnings[0]}` : ''}`);
     if (result.evidenceUrl) {
@@ -164,7 +168,12 @@ async function runStudy() {
       $('#evidenceTitle').textContent = result.evidence?.source?.title || 'Representative analysed frame';
       $('#evidenceTime').textContent = `${result.evidenceFrame.timeSec.toFixed(2)}s · frame ${result.evidenceFrame.frame}`;
     }
-    renderPreview(); toast('Measured motion blueprint ready');
+    if (result.reconstructionUrl) {
+      const metrics = result.reconstruction.metrics;
+      $('#reconstructionView').hidden = false; $('#reconstructionImage').src = result.reconstructionUrl;
+      $('#reconstructionMetrics').textContent = `SSIM ${metrics.structuralSimilarity.toFixed(3)} · edge ${metrics.edgeF1.toFixed(3)} · ${result.reconstruction.complexity.assetBytes.value} bytes`;
+    }
+    renderPreview(); toast('Measured blueprint and reconstruction ready');
   } catch (error) {
     setProgress('ANALYSIS FAILED', 0, error.message);
   } finally { button.disabled = false; button.textContent = 'Start measured study'; $('#analysisProgress').classList.remove('running'); }

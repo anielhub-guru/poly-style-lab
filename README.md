@@ -1,6 +1,6 @@
 # Poly Style Lab
 
-Poly Style Lab measures the **motion style** of a creator from a small, representative sample: 10–20 YouTube Shorts (or one short video, or a local folder). For each video it keeps only the first ~45 s at 480p, measures animation cadence at the video's native frame rate, cuts and (when pose tracking is installed) body motion in shoulder-widths per second, and aggregates the recurring patterns into `polystudio.motion-style-blueprint/v1` plus a ready-to-install PolyStudio pack. It is built to take minutes and a few MB per video, not to download a channel.
+Poly Style Lab measures the **motion and rendered visual style** of a creator from a small, representative sample: 10–20 YouTube Shorts (or one short video, or a local folder). For each video it keeps only the first ~45 s at 480p, measures animation cadence at the video's native frame rate, cuts and (when pose tracking is installed) body motion in shoulder-widths per second, then automatically selects the evidence frame with the lowest measured reconstruction cost. It exports `polystudio.motion-style-blueprint/v1`, a ready-to-install PolyStudio pack, and a local numeric visual-reconstruction blueprint with a lightweight Three.js/SVG handoff.
 
 It also exports a PolyStudio-compatible declarative story-format `pack.json` and matching `style-guide.md`.
 
@@ -50,7 +50,7 @@ node bin/poly-style-lab.js style_analysis_status --input '{"outputDir":"./worksp
 
 `source` accepts a channel (its Shorts), a shorts/playlist URL, a single video URL, a local video, or a local folder. Per video only the first `maxSecondsPerVideo` (default 45, max 180) are downloaded, at ≤480p without audio, and videos are spread evenly across the newest 120 listed. Downloaded sources are deleted after measuring unless `keepSources` is true; only measurements and one evidence frame per video are kept. Re-running a study in the same folder reuses finished measurements. One failing video is skipped and reported, not fatal.
 
-**Output for agents is small by design.** The command returns a few headline lines, confidence and warnings (~2 KB). Read `summary.md` for the rules in plain language, or `motion-style-blueprint.json` for the full distributions. Copy `pack/` to `PolyStudio/packs/<id>/` to use the measured rules in PolyStudio.
+**Output for agents is small by design.** The command returns headline measurements, confidence, warnings, and compact reconstruction metrics. Read `summary.md` for the rules in plain language, `motion-style-blueprint.json` for the motion/look distributions, or `reconstruction/visual-reconstruction-blueprint.json` for evidence-backed reconstruction parameters. Import `reconstruction/scene.aikiscene` through AikiStudio's **Recreate reference** drawer to build separate fixed SVG set layers in 3D space; it never imports the reference as one flattened scene image. Choose `reconstructionQuality: standard | high | ultra` when starting the study; Standard is recommended for normal laptops. Copy `pack/` to `PolyStudio/packs/<id>/` to use the measured rules in PolyStudio.
 
 ### MCP configuration
 
@@ -93,6 +93,8 @@ The motion blueprint records, as distributions across videos (never zero-filled 
 ## Limitations
 
 - The look numbers are measurements of the picture, not a style classifier. Outline coverage and edge width are reliable; the 2D-effect and backdrop figures are heuristics that also fire on fades inside a scene, soft shadows and focus pulls, so check the effect evidence frames before trusting them. Palette and edge numbers describe the rendered frames, including any watermark.
+
+- The AikiStudio handoff reconstructs the chosen view as separate fixed SVG flats with derived depth spacing and an analytically aligned perspective camera. This creates an editable physical-set effect and parallax, but it does not recover hidden surfaces or prove true metric depth from one view. If no independent foreground layer can be recovered, the package is marked unsupported instead of exporting a flattened scene.
 
 - Pose tracking is trained on real people. Stylised or very small figures may not track; those videos still contribute cadence and cutting, are excluded from body-motion statistics, and the warnings say so.
 - The sample is the newest ≤120 listed uploads, spread evenly; it describes recent style, not a creator's whole history.

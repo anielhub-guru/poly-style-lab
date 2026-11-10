@@ -5,6 +5,7 @@ import { explainDownloadError, preflight } from './environment.js';
 import { LIMITS, catalogSource } from './source-catalog.js';
 import { acquire, normalize } from './video-ingest.js';
 import { aggregateMeasurements, analyseVideo, loadCached, writeStudy } from './style-analysis.js';
+import { reconstructStudy } from './reconstruction.js';
 
 const running = new Map(); // workspace -> promise, so one workspace never runs twice
 const clamp = (value, min, max, fallback) => Number.isFinite(Number(value)) && value !== null && value !== '' ? Math.min(max, Math.max(min, Number(value))) : fallback;
@@ -70,12 +71,15 @@ async function execute(input, workspace) {
   if (!measurements.length) throw new Error(`No video could be analysed. First problem: ${skipped[0]?.reason || 'unknown'}`);
   const blueprint = aggregateMeasurements(measurements, catalog, { skipped, warnings: env.warnings, maxSeconds, poseAvailable: env.pose });
   const files = await writeStudy(workspace, blueprint, name);
+  await setStatus(workspace, { stage: 'reconstructing', message: 'Selecting and fitting a measured visual reconstruction…' });
+  const reconstruction = await reconstructStudy({ workspace, measurements, env, quality: ['standard', 'high', 'ultra'].includes(input.reconstructionQuality) ? input.reconstructionQuality : 'standard' });
   const first = blueprint.videos[0];
   return {
     output: files.output, summaryFile: files.summary, packDir: files.packDir, workspace,
     videosAnalysed: measurements.length, skipped: skipped.slice(0, 5), analysisFps: 30,
     headline: blueprint.summary, confidence: blueprint.confidence, warnings: blueprint.warnings,
     evidence: { source: { title: first.title }, image: first.evidence.image }, evidenceFrame: first.evidence,
+    reconstruction,
   };
 }
 

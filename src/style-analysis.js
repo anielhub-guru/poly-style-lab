@@ -5,8 +5,9 @@ import { runProcess } from './process.js';
 import { projectRoot } from './environment.js';
 import { lensToFov } from './blueprint.js';
 
-export const ANALYSIS_VERSION = 4;
+export const ANALYSIS_VERSION = 5;
 const analyser = join(projectRoot, 'analysis', 'analyze_video.py');
+const temporalTracker = join(projectRoot, 'analysis', 'track_components.py');
 const GROUPS = ['head', 'shoulders', 'hands', 'torso', 'hips', 'legs'];
 const fileId = id => String(id).replace(/[^a-z0-9_-]/gi, '_');
 
@@ -46,11 +47,18 @@ export async function analyseVideo({ item, sourcePath, normalizedPath, workspace
   const evidencePath = join(evidenceDir, `${id}.jpg`);
   await runProcess('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-ss', String(measurement.representativeFrame.timeSec), '-i', normalizedPath, '-frames:v', '1', '-q:v', '3', evidencePath], { timeoutMs: 60_000 });
   const lookEvidence = await lookImages({ measurement, id, evidenceDir, sheetPpm, normalizedPath, workspace });
+  let temporal = { available: false, reason: 'temporal component measurement failed' };
+  try {
+    const temporalPath = join(measurementsDir, `${id}-temporal.json`);
+    await runProcess(env.python, [temporalTracker, normalizedPath, '--time', String(measurement.representativeFrame.timeSec), '--output', temporalPath], { timeoutMs: 120_000 });
+    temporal = JSON.parse(await readFile(temporalPath, 'utf8'));
+  } catch { /* cadence, look and single-frame reconstruction remain valid */ }
   const record = {
     ...measurement,
     settings: { maxSeconds },
     source: { id: item.id, title: item.title, url: item.url || null, channel: item.channel || null, sourceIndex: item.sourceIndex },
     evidence: { image: relative(workspace, evidencePath), timeSec: measurement.representativeFrame.timeSec, frame: measurement.representativeFrame.frame, ...lookEvidence },
+    temporal,
   };
   await writeFile(output, JSON.stringify(record));
   return record;

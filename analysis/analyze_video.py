@@ -29,7 +29,7 @@ except ImportError:  # pose is optional
     cv2 = None
     mp = None
 
-VERSION = 4
+VERSION = 5
 FPS = 30.0
 HOLD = 0.85        # mean abs gray difference (0-255, 160x90) below which the picture is "held"
 CUT_MIN = 22.0     # a cut needs at least this difference ...
