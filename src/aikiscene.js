@@ -88,6 +88,8 @@ export function characterHandoff(scene, subject, selected = null, resolved = {})
       assetId: layer?.assetId ?? null, boundsPx: bounds, paletteHex: subject.paletteHex || [],
       proportions: { aspectRatio: subject.features?.aspectRatio, elongation: subject.features?.elongation },
       lightDirection2d: subject.dimensionality?.evidence?.lightDirection2d ?? null,
+      // Colours by body band and garment hints, so a 3D character can be dressed like the reference.
+      wardrobe: subject.wardrobe?.sufficient ? { roles: subject.wardrobe.roles, confidence: subject.wardrobe.confidence, garments: subject.wardrobe.garments, limits: subject.wardrobe.limits } : null,
     },
     rig: (selected ? selected === '3d' : kind === 'volumetric-3d') ? null : {
       strategy: subject.selectedStrategy, partIds: (subject.parts || subject.bones || []).map(item => item.id), supportedMotion: subject.supportedMotion,
@@ -105,6 +107,11 @@ const boundsGap = (a, b) => Math.max(0, a[0] - b[2], b[0] - a[2], a[1] - b[3], b
  * character: they share a decision, and the largest piece carries the anchor of the whole union.
  */
 export function groupSubjects(subjects, gapPx = 2) {
+  if (subjects.length && subjects.every(subject => subject.figureId)) {   // the analyser already grouped them
+    const byFigure = new Map();
+    for (const subject of subjects) byFigure.set(subject.figureId, [...(byFigure.get(subject.figureId) || []), subject]);
+    return [...byFigure.values()];
+  }
   const parent = subjects.map((_, index) => index);
   const find = index => parent[index] === index ? index : (parent[index] = find(parent[index]));
   subjects.forEach((a, i) => subjects.forEach((b, j) => { if (j > i && boundsGap(a.boundsPx, b.boundsPx) <= gapPx) parent[find(j)] = find(i); }));
@@ -169,10 +176,33 @@ function sceneEntities(scene, subjects) {
       return layer.id === support.id || (cx >= sx - sw * 2 && cx <= sx + sw * 3 && cy >= sy - sh * 2 && cy <= sy + sh && ['repeated-prop', 'prop-candidate'].includes(layer.role));
     });
     if (candidates.length < 2) continue;
+    const canopy = candidates.find(layer => layer.role === 'prop-candidate');
+    const fruit = candidates.filter(layer => layer.role === 'repeated-prop');
+    const treeRecipe = canopy && fruit.length >= 3 ? (() => {
+      const [cw, ch] = canopy.size, [cx, cy, cz] = canopy.transform.position;
+      const depth = Math.max(.24, cw * .28), canopyColor = canopy.backingColor, trunkColor = support.backingColor;
+      const crown = [
+        [0, .08, .62, .58, .86], [-.28, -.06, .52, .5, .7], [.29, -.04, .54, .52, .74],
+        [-.12, .28, .45, .4, .62], [.2, .25, .42, .38, .58],
+      ].map(([dx, dy, sx, sy, sz], crownIndex) => ({
+        shape: 'sphere', name: `canopy-${crownIndex + 1}`, radius: .5, segments: 5,
+        position: [cx + dx * cw, cy + dy * ch, cz], scale: [sx * cw, sy * ch, sz * depth], color: canopyColor,
+      }));
+      const [tw, th] = support.size, [tx, ty, tz] = support.transform.position;
+      const parts = [{
+        shape: 'cylinder', name: 'trunk', radiusTop: tw * .22, radiusBottom: tw * .29, height: th, segments: 6,
+        position: [tx, ty, tz], color: trunkColor,
+      }, ...crown, ...fruit.map((layer, fruitIndex) => ({
+        shape: 'sphere', name: `fruit-${fruitIndex + 1}`, radius: Math.max(.045, Math.min(...layer.size) * .46), segments: 6,
+        position: [layer.transform.position[0], layer.transform.position[1], Math.max(layer.transform.position[2], cz + depth * .5)], color: layer.backingColor,
+      }))];
+      return { name: 'Measured fruit tree', origin: 'keep', parts };
+    })() : null;
     entities.push({
-      id: `entity-prop-${index + 1}`, name: `Recovered prop ${index + 1}`, kind: 'prop', strategy: 'layer-group',
+      id: `entity-prop-${index + 1}`, name: treeRecipe ? 'Measured low-poly tree' : `Recovered prop ${index + 1}`, kind: 'prop', strategy: treeRecipe ? 'procedural-recipe' : 'layer-group',
       sourceLayerIds: candidates.map(layer => layer.id), transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
       confidence: Math.min(...candidates.map(layer => layer.confidence || .5)),
+      ...(treeRecipe ? { semanticClass: 'fruit-tree', recipe: treeRecipe } : {}),
       parts: candidates.map(layer => ({ id: layer.id, assetId: layer.assetId, size: layer.size, position: layer.transform.position, layerOrder: layer.depthOrder || 0 })),
     });
   }

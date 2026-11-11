@@ -600,6 +600,134 @@ def luma(rgb):
     return value[..., 0] * 0.2126 + value[..., 1] * 0.7152 + value[..., 2] * 0.0722
 
 
+def evidence_view(result, mask, labels=None):
+    """The higher-resolution evidence frame with a mask (and optional label map) resampled onto it."""
+    frame = result.get("evidenceFrame")
+    if frame is None:
+        return result["frame"], mask, labels
+    if frame.shape[:2] != result["labels"].shape:
+        rows = (np.arange(frame.shape[0]) * result["labels"].shape[0] / frame.shape[0]).astype(int)
+        cols = (np.arange(frame.shape[1]) * result["labels"].shape[1] / frame.shape[1]).astype(int)
+        mask = mask[rows][:, cols]
+        labels = labels[rows][:, cols] if labels is not None else None
+    return frame, mask, labels
+
+
+SUBJECT_ROLES = {"subject-candidate", "character-candidate"}
+
+
+def bbox_gap(a, b):
+    return max(0, a[0] - b[2], b[0] - a[2], a[1] - b[3], b[1] - a[3])
+
+
+def figure_groups(result, gap=2):
+    """Group touching subject layers into one figure; small unclassified foreground pieces beside it (a head) join it."""
+    layers = result["decomposition"]["layers"]
+    subjects = [layer for layer in layers if layer["role"] in SUBJECT_ROLES]
+    parent = list(range(len(subjects)))
+    def find(index):
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+    for i, a in enumerate(subjects):
+        for j in range(i + 1, len(subjects)):
+            if bbox_gap(a["bbox"], subjects[j]["bbox"]) <= gap:
+                parent[find(j)] = find(i)
+    groups = {}
+    for index, layer in enumerate(subjects):
+        groups.setdefault(find(index), []).append(layer)
+    figures = []
+    for number, members in enumerate(groups.values(), 1):
+        union = [min(m["bbox"][0] for m in members), min(m["bbox"][1] for m in members), max(m["bbox"][2] for m in members), max(m["bbox"][3] for m in members)]
+        area = (union[2] - union[0]) * (union[3] - union[1])
+        absorbed = [layer for layer in layers if layer["role"] == "foreground-detail" and layer not in members
+                    and (layer["bbox"][2] - layer["bbox"][0]) * (layer["bbox"][3] - layer["bbox"][1]) <= area * 0.6 and bbox_gap(layer["bbox"], union) <= gap]
+        figures.append({"id": f"figure-{number}", "members": members, "absorbed": absorbed, "bbox": union})
+    return figures
+
+
+def hsl_of(rgb):
+    import colorsys
+    h, l, s = colorsys.rgb_to_hls(*(float(c) / 255 for c in rgb))
+    return h * 360, s, l
+
+
+def skin_like(rgb):
+    h, s, l = hsl_of(rgb)
+    return 8 <= h <= 45 and 0.2 <= s <= 0.75 and 0.3 <= l <= 0.82
+
+
+def band_clusters(pixels, k=3):
+    if len(pixels) < 40:
+        return []
+    rng = np.random.default_rng(5)
+    sample = pixels if len(pixels) <= 3000 else pixels[rng.choice(len(pixels), 3000, replace=False)]
+    centers, labels = kmeans(sample.astype(np.float64), min(k, len(sample)))
+    counts = np.bincount(labels, minlength=len(centers)) / len(labels)
+    return sorted(({"rgb": centers[i], "hex": hex_color(centers[i]), "share": float(counts[i])} for i in range(len(centers)) if counts[i] > 0.04), key=lambda c: -c["share"])
+
+
+def figure_wardrobe(result, figure):
+    """Colours by body band (head, torso, legs, feet): what AikiStudio needs to dress a 3D character like the reference."""
+    mask = np.zeros(result["labels"].shape, bool)
+    for layer in figure["members"] + figure["absorbed"]:
+        mask |= layer["mask"]
+    frame, mask, _ = evidence_view(result, mask)
+    ys, xs = np.nonzero(mask)
+    if len(ys) < 120:
+        return {"sufficient": False, "method": "body-band-dominant-colour"}
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    span = max(1, y1 - y0)
+    rows = (np.arange(frame.shape[0]) - y0) / span
+    spec = {"head": (0.0, 0.17), "torso": (0.17, 0.55), "legs": (0.55, 0.92), "feet": (0.92, 1.01)}
+    bands, widths = {}, {}
+    for name, (low, high) in spec.items():
+        selection = mask & ((rows >= low) & (rows < high))[:, None]
+        bands[name] = (band_clusters(frame[selection]), int(selection.sum()))
+        widths[name] = float(selection.sum(1)[selection.any(1)].mean()) if selection.any() else 0.0
+    # The face is the most reliable skin cue; arms and legs only count when the head shows none.
+    def skin_in(*names):
+        found = [cluster for name in names for cluster in bands[name][0] if skin_like(cluster["rgb"])]
+        return max(found, key=lambda cluster: cluster["share"]) if found else None
+    skin = skin_in("head") or skin_in("torso", "legs")
+    def pick(band, exclude=()):
+        for cluster in bands[band][0]:
+            if skin is not None and skin_like(cluster["rgb"]) and np.linalg.norm(cluster["rgb"] - skin["rgb"]) < 60:
+                continue
+            if any(np.linalg.norm(cluster["rgb"] - other["rgb"]) < 40 for other in exclude if other is not None):
+                continue
+            return cluster
+        return None
+    def confidence(cluster, band):
+        return round(float(cluster["share"]) * min(1.0, bands[band][1] / 300), 3) if cluster else 0.0
+    hair = None
+    head_nonskin = [c for c in bands["head"][0] if not (skin is not None and np.linalg.norm(c["rgb"] - skin["rgb"]) < 60)]
+    dark = [c for c in head_nonskin if hsl_of(c["rgb"])[2] < 0.35]
+    if dark:
+        hair = min(dark, key=lambda c: hsl_of(c["rgb"])[2])
+    headwear = next((c for c in head_nonskin if c is not hair and hsl_of(c["rgb"])[1] > 0.35 and c["share"] >= 0.15), None)
+    top = pick("torso", exclude=(hair,))
+    bottom = pick("legs", exclude=())
+    footwear = pick("feet", exclude=(bottom,))
+    full_body = bool(top and bottom and np.linalg.norm(top["rgb"] - bottom["rgb"]) < 40 and widths["legs"] >= 0.8 * widths["torso"])
+    roles = {"skin": skin, "hair": hair, "top": top, "bottom": bottom, "footwear": footwear, "headwear": headwear}
+    bands_of = {"skin": "head", "hair": "head", "top": "torso", "bottom": "legs", "footwear": "feet", "headwear": "head"}
+    garments = [{"category": "full-body", "color": top["hex"], "confidence": confidence(top, "torso")}] if full_body else []
+    if not full_body:
+        garments += [{"category": category, "color": roles[role]["hex"], "confidence": confidence(roles[role], bands_of[role])} for category, role in (("top", "top"), ("bottom", "bottom")) if roles[role]]
+    for category, role in (("footwear", "footwear"), ("headwear", "headwear")):
+        if roles[role]:
+            garments.append({"category": category, "color": roles[role]["hex"], "confidence": confidence(roles[role], bands_of[role])})
+    return {
+        "sufficient": True, "method": "body-band-dominant-colour",
+        "roles": {name: (cluster["hex"] if cluster else None) for name, cluster in roles.items()},
+        "confidence": {name: confidence(cluster, bands_of[name]) for name, cluster in roles.items() if cluster},
+        "garments": garments,
+        "limits": ["assumes an upright figure split by height (head, torso, legs, feet)", "patterns, layered clothing and exact garment shapes are not recovered"],
+    }
+
+
 def erode_mask(mask, steps=2):
     out = mask.copy()
     for _ in range(steps):
@@ -619,14 +747,7 @@ def volume_evidence(result, mask):
     textured 2D art can look shaded, so the result is evidence with an explicit confidence.
     """
     # Measure on a higher-resolution copy: small subjects have no interior pixels at the analysis size.
-    frame = result.get("evidenceFrame")
-    labels = result["labels"]
-    if frame is None:
-        frame = result["frame"]
-    elif frame.shape[:2] != labels.shape:
-        rows = (np.arange(frame.shape[0]) * labels.shape[0] / frame.shape[0]).astype(int)
-        cols = (np.arange(frame.shape[1]) * labels.shape[1] / frame.shape[1]).astype(int)
-        mask, labels = mask[rows][:, cols], labels[rows][:, cols]
+    frame, mask, labels = evidence_view(result, mask, result["labels"])
     inner = erode_mask(mask, 2)
     lum = luma(frame)
     total = tonal = explained = 0.0
@@ -1252,6 +1373,11 @@ def export(result, source, output_dir, quality="standard"):
         ppm.unlink()
     summary = result["summary"]
     confidence = max(0.0, min(1.0, 1 - summary["selectionScore"]))
+    figure_of = {}
+    for figure in figure_groups(result):
+        wardrobe = figure_wardrobe(result, figure)
+        for layer in figure["members"]:
+            figure_of[layer["id"]] = {"id": figure["id"], "bboxPx": figure["bbox"], "wardrobe": wardrobe}
     blueprint = {
         "schema": "ikistudio.visual-reconstruction-blueprint/v1",
         "source": {"evidenceImage": str(source)},
@@ -1285,6 +1411,7 @@ def export(result, source, output_dir, quality="standard"):
                 "boundsPx": item["bbox"], "areaPx": item["area"],
                 "palette": [hex_color(colour) for colour in item["localPalette"]] if item["localPalette"] is not None else [hex_color(result["palette"][label]) for label in item["labels"]],
                 **({"volumeEvidence": volume_evidence(result, item["mask"])} if item["role"] in {"subject-candidate", "character-candidate"} else {}),
+                **({"figure": figure_of[item["id"]]} if item["id"] in figure_of else {}),
                 **({"family": item["family"]} if item["family"] else {}),
                 **({"track": item["track"]} if item.get("track") else {}),
                 "asset": f'assets/{item["id"]}.svg' if layered else None,

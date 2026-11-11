@@ -148,6 +148,7 @@ def build(blueprint_path, temporal_path, output_dir):
             "sourceSizePx": [source_width, source_height], "classification": classification,
             "selectedStrategy": strategy, "classificationConfidence": confidence, "features": features,
             "dimensionality": dimensionality(candidate), "paletteHex": candidate.get("palette", []),
+            **({"figureId": candidate["figure"]["id"], "wardrobe": candidate["figure"]["wardrobe"]} if candidate.get("figure") else {}),
             "motion": motion(track_data) if track_data else {"translationAmplitudePx": [0, 0], "observedDisplacementPx": 0, "sampleFps": 0, "method": "no-temporal-evidence"},
         }
         if strategy == "segmented-cutout":

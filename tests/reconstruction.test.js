@@ -273,6 +273,15 @@ for name, shaded in (('flat', False), ('shaded', True)):
   const lone = shadedScene.subjects.find(item => !item.handoff.group.primary);
   if (lone) { applyCharacterChoice(shadedScene, lone.id, '2d'); assert.ok(shadedScene.subjects.every(item => item.handoff.choice.selected === '2d'), 'a choice on any piece applies to the whole figure'); applyCharacterChoice(shadedScene, lone.id, null); }
 
+  // The handoff carries what the character wore: skin from the face, the torso garment from the torso band.
+  const wardrobe = shadedScene.subjects.find(item => item.handoff.group.primary).handoff.reference.wardrobe;
+  assert.ok(wardrobe, 'wardrobe roles are measured for the figure');
+  const rgb = hex => [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16));
+  const [skinR, skinG, skinB] = rgb(wardrobe.roles.skin), [topR, topG, topB] = rgb(wardrobe.roles.top);
+  assert.ok(skinR > 180 && skinG > 140 && skinB > 100, `skin should be the light face tone, got ${wardrobe.roles.skin}`);
+  assert.ok(topR > topG + 40 && topR > topB + 40, `top should be the orange-red torso, got ${wardrobe.roles.top}`);
+  assert.ok(wardrobe.garments.some(item => item.category === 'top'));
+
   // The person decides: a choice overrides the measured class, restores or drops the 2D rig, and keeps the package valid.
   const subject = shadedScene.subjects.find(item => item.dimensionality.class === 'volumetric-3d');
   assert.deepEqual(subject.handoff.choice, { options: ['2d', '3d'], suggested: '3d', selected: null, source: 'unset' });
