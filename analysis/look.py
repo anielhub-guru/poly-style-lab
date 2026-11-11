@@ -206,6 +206,25 @@ def write_sheet(path, frame, L, ink):
         handle.write(both.tobytes())
 
 
+def focal_light(luma_frames):
+    """Estimate a broad bright patch inside the scene, relative to its surround."""
+    _, height, width = luma_frames.shape
+    x, y = np.meshgrid((np.arange(width) + .5) / width, (np.arange(height) + .5) / height)
+    candidates = []
+    for cy in np.linspace(.38, .74, 7):
+        for cx in np.linspace(.22, .78, 7):
+            for radius in (.075, .12, .17):
+                distance = np.hypot(x - cx, (y - cy) * height / width)
+                inside = distance < radius
+                surround = (distance > radius * 1.35) & (distance < radius * 2.1)
+                delta = luma_frames[:, inside].mean(1) - luma_frames[:, surround].mean(1)
+                candidates.append((float(np.percentile(delta, 80)), cx, cy, radius))
+    contrast, cx, cy, radius = max(candidates)
+    if contrast < .035:
+        return None
+    return {"x": r(cx), "y": r(cy), "radiusOfWidth": r(radius), "contrast": r(contrast)}
+
+
 def analyze(path, max_sec, sheet_path=None):
     frames = read_frames(path, max_sec)
     count, h, w, _ = frames.shape
@@ -300,4 +319,5 @@ def analyze(path, max_sec, sheet_path=None):
         write_sheet(sheet_path, frames[pick], L[pick], ink_all[len(index) // 3])
         sheet = {"timeSec": r(pick / FPS, 2)}
     return {"available": True, "sampleFps": FPS, "frames": count, "colour": colour, "edges": edges, "softness": softness, "effects2d": effects, "backdrop": backdrop,
+            "focalLight": focal_light(L[index]),
             "sheet": sheet}

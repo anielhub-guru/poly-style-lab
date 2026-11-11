@@ -5,7 +5,7 @@ import { runProcess } from './process.js';
 import { projectRoot } from './environment.js';
 import { lensToFov } from './blueprint.js';
 
-export const ANALYSIS_VERSION = 5;
+export const ANALYSIS_VERSION = 7;
 const analyser = join(projectRoot, 'analysis', 'analyze_video.py');
 const temporalTracker = join(projectRoot, 'analysis', 'track_components.py');
 const GROUPS = ['head', 'shoulders', 'hands', 'torso', 'hips', 'legs'];

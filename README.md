@@ -52,6 +52,17 @@ node bin/poly-style-lab.js style_analysis_status --input '{"outputDir":"./worksp
 
 **Output for agents is small by design.** The command returns headline measurements, confidence, warnings, and compact reconstruction metrics. Read `summary.md` for the rules in plain language, `motion-style-blueprint.json` for the motion/look distributions, or `reconstruction/visual-reconstruction-blueprint.json` for evidence-backed reconstruction parameters. Import `reconstruction/scene.aikiscene` through AikiStudio's **Recreate reference** drawer to build separate fixed SVG set layers in 3D space; it never imports the reference as one flattened scene image. Choose `reconstructionQuality: standard | high | ultra` when starting the study; Standard is recommended for normal laptops. Copy `pack/` to `PolyStudio/packs/<id>/` to use the measured rules in PolyStudio.
 
+### Transfer a measured look to an AikiStudio story
+
+Use a video's per-video measurement JSON and an exported AikiStudio story JSON.
+
+```sh
+node bin/transfer-studio-style.js measurement.json input.story.json styled.story.json
+```
+
+Open the result as a story in AikiStudio. The transfer assigns palette colours to named recipe parts (such as grass, roof, and foliage) and applies lighting and exposure settings. For a static, flat-ground shot, it adds an editable SVG lighting layer with a measured focal patch and approximate soft shadows. Shadow direction is a default art-direction setting. The layer stays fixed when props move. Unrecognised material names keep their original colours.
+
+
 ### Approximate 3D view
 
 `scene.aikiscene` now describes an approximate 3D diorama, not only flat cards. Open `http://127.0.0.1:8788/viewer.html?scene=/workspaces/<id>/reconstruction/scene.aikiscene` (or use **View in 3D** after a study) and sway, orbit or reset to the reference camera.
