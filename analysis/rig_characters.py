@@ -73,6 +73,29 @@ def classify_subject(layer_data, track_data, scene_type):
     return classification, strategy, round(confidence, 3), features
 
 
+def dimensionality(layer_data):
+    """Tell a flat 2D sprite from a genuinely shaded 3D character, from measured shading evidence.
+
+    A lit volume keeps one chromaticity while luminance sweeps a wide range, smoothly in space and
+    along one light direction. Flat art shows discrete tones or none. One frame cannot prove volume:
+    cel-shaded 3D can read as flat and painterly 2D can read as shaded, so the middle band is
+    reported as uncertain instead of guessed.
+    """
+    evidence = layer_data.get("volumeEvidence") or {}
+    limits = ["single-frame shading evidence; cel-shaded 3D may read as flat", "painterly 2D with soft shading may read as volumetric", "validated on synthetic figures only; on real rendered frames stylised 2D and textured 3D were not separable from one frame"]
+    if not evidence.get("sufficient"):
+        return {"class": "uncertain", "confidence": 0.0, "volumeScore": None, "method": "single-frame-shading-evidence", "evidence": evidence, "limits": limits + ["too few interior pixels to measure"]}
+    fit, span, coherence = evidence["smoothShadingFit"], evidence["chromaLuminanceSpan"], evidence["lightCoherence"]
+    score = clamp(.45 * clamp((fit - .55) / .4) + .3 * clamp((span - .01) / .06) + .25 * clamp((coherence - .5) / .5))
+    if score >= .7:
+        name, confidence = "volumetric-3d", score
+    elif score <= .2:  # only clearly flat evidence earns the flat label; real footage rarely does
+        name, confidence = "flat-2d-sprite", 1 - score
+    else:
+        name, confidence = "uncertain", 0.5
+    return {"class": name, "confidence": round(clamp(confidence), 3), "volumeScore": round(score, 3), "method": "single-frame-shading-evidence", "evidence": evidence, "limits": limits}
+
+
 def motion(track_data):
     points = track_data.get("centroidsPx", [])
     xs = [point[0] for point in points]
@@ -111,7 +134,7 @@ def build(blueprint_path, temporal_path, output_dir):
     candidates = [item for item in blueprint["components"].get("semanticLayers", []) if item["role"] in {"subject-candidate", "character-candidate"} and item.get("asset")]
     if not candidates and blueprint["components"].get("character", {}).get("available") and (source_dir / "character.svg").exists():
         bounds = blueprint["components"]["character"]["boundsPx"]
-        candidates = [{"id": "measured-character", "role": "character-candidate", "confidence": .7, "boundsPx": bounds, "areaPx": max(1, (bounds[2] - bounds[0]) * (bounds[3] - bounds[1]) // 2), "palette": [], "asset": "character.svg"}]
+        candidates = [{"id": "measured-character", "role": "character-candidate", "confidence": .7, "boundsPx": bounds, "areaPx": max(1, (bounds[2] - bounds[0]) * (bounds[3] - bounds[1]) // 2), "palette": [], "volumeEvidence": blueprint["components"]["character"].get("volumeEvidence"), "asset": "character.svg"}]
 
     subjects = []
     for candidate in candidates:
@@ -124,6 +147,7 @@ def build(blueprint_path, temporal_path, output_dir):
             "id": safe_id, "sourceLayer": candidate["id"], "boundsPx": candidate["boundsPx"],
             "sourceSizePx": [source_width, source_height], "classification": classification,
             "selectedStrategy": strategy, "classificationConfidence": confidence, "features": features,
+            "dimensionality": dimensionality(candidate), "paletteHex": candidate.get("palette", []),
             "motion": motion(track_data) if track_data else {"translationAmplitudePx": [0, 0], "observedDisplacementPx": 0, "sampleFps": 0, "method": "no-temporal-evidence"},
         }
         if strategy == "segmented-cutout":

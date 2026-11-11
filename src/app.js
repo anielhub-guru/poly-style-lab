@@ -58,6 +58,10 @@ function init() {
     if (!analysisResult?.aikiSceneUrl) return toast('Run a measured channel study first');
     download(`${slugify(state.name)}.aikiscene`, await (await fetch(analysisResult.aikiSceneUrl)).text(), 'application/json');
   });
+  $('#viewAikiScene3d').addEventListener('click', () => {
+    if (!analysisResult?.aikiSceneUrl) return toast('Run a measured channel study first');
+    window.open(`/viewer.html?scene=${encodeURIComponent(analysisResult.aikiSceneUrl)}`, '_blank', 'noopener');
+  });
   $('#exportSheet').addEventListener('click', () => download(`${slugify(state.name)}.reference-sheet.svg`, referenceSheetSvg(normalizeBlueprint(state)), 'image/svg+xml'));
   $('#exportPackInline').addEventListener('click', exportPack);
   $('#copyCodex').addEventListener('click', () => copyText($('#codexCommand').textContent, 'Codex handoff copied'));

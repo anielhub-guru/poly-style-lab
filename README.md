@@ -52,6 +52,20 @@ node bin/poly-style-lab.js style_analysis_status --input '{"outputDir":"./worksp
 
 **Output for agents is small by design.** The command returns headline measurements, confidence, warnings, and compact reconstruction metrics. Read `summary.md` for the rules in plain language, `motion-style-blueprint.json` for the motion/look distributions, or `reconstruction/visual-reconstruction-blueprint.json` for evidence-backed reconstruction parameters. Import `reconstruction/scene.aikiscene` through AikiStudio's **Recreate reference** drawer to build separate fixed SVG set layers in 3D space; it never imports the reference as one flattened scene image. Choose `reconstructionQuality: standard | high | ultra` when starting the study; Standard is recommended for normal laptops. Copy `pack/` to `PolyStudio/packs/<id>/` to use the measured rules in PolyStudio.
 
+### Approximate 3D view
+
+`scene.aikiscene` now describes an approximate 3D diorama, not only flat cards. Open `http://127.0.0.1:8788/viewer.html?scene=/workspaces/<id>/reconstruction/scene.aikiscene` (or use **View in 3D** after a study) and sway, orbit or reset to the reference camera.
+
+- **Smooth edges:** pixel outlines are resampled and relaxed (Taubin smoothing) and simplified; large rectangles and image borders stay exact.
+- **Depth without a model:** an object standing on the ground meets it at a row below the horizon, which fixes its distance. Layers are placed by that ground contact; anything above the horizon is far backdrop. The horizon comes from the measured structure. There is no learned depth model, so depth is approximate and hidden surfaces are not recovered.
+- **World:** a ground plane and back wall are textured by projecting the reference backdrop from the reference camera, so the reference view still matches the source. The camera carries `lensShiftNdcY` to put the horizon on the right row; importers must apply it.
+- **Volume:** each cutout layer is extruded from its real silhouette (`thickness`, scaled by size and whether it stands on the ground), with flat front faces and shaded sides. Ground-standing layers get a contact-shadow primitive.
+- Additive fields: `world`, `camera.lensShiftNdcY`, `layers[].depth`, `layers[].projectedBackdrop`, `primitives[]` of kind `contact-shadow`.
+
+### Character handoff to AikiStudio
+
+Each recovered subject carries `handoff` (`aikistudio.character-handoff/v1`): where to stand it (`anchor`), what to build from (`reference`), a replaceable extruded-cutout `placeholder`, and for 2D the cutout/spline `rig`. Whether a subject is a flat 2D sprite or a genuinely 3D character is **the user's decision**: the lab only measures shading as a hint (`dimensionality`, `choice.suggested`) because one frame cannot reliably tell stylised flat art from a textured render. Until chosen, `target` is `needs-choice` and `defaultTarget` is the 2D sprite. `applyCharacterChoice(scene, subjectId, '2d' | '3d' | null)` in `src/aikiscene.js` records the choice (`choice.selected`, `choice.source: "user"`), rebuilds the handoff and re-signs the package; choices survive re-embedding a rig into an existing package, but a fresh analysis starts unset.
+
 ### MCP configuration
 
 ```json

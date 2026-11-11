@@ -17,6 +17,11 @@ from pathlib import Path
 
 import numpy as np
 
+try:
+    import world3d
+except ImportError:  # imported as a package
+    from analysis import world3d
+
 LONG_SIDE = 320
 MAX_COLORS = 12
 MAX_REGIONS = 3500
@@ -426,6 +431,36 @@ def apply_temporal_layers(decomposition, temporal, labels):
     return {**decomposition, "layers": layers, "backgroundMask": ~claimed, "temporalTracks": confirmed}
 
 
+def promote_supported_props(decomposition, labels, palette):
+    """Promote a large dark mass touching a measured static support into one prop layer."""
+    layers = list(decomposition["layers"])
+    background = decomposition["backgroundMask"].copy()
+    height, width = labels.shape
+    luminance = np.asarray([0.2126 * colour[0] + 0.7152 * colour[1] + 0.0722 * colour[2] for colour in palette])
+    for index, support in enumerate([item for item in layers if item["role"] == "static-support"], 1):
+        sx0, sy0, sx1, sy1 = support["bbox"]
+        sw, sh = sx1 - sx0, sy1 - sy0
+        rx0, rx1 = max(0, sx0 - sw * 2), min(width, sx1 + sw * 3)
+        ry0, ry1 = max(0, int(sy0 - sh * 1.6)), min(height, sy0 + max(4, sh // 5))
+        roi = np.zeros(labels.shape, dtype=bool); roi[ry0:ry1, rx0:rx1] = True
+        roi_values = luminance[labels[roi & background]]
+        if not len(roi_values):
+            continue
+        dark = roi & background & (luminance[labels] <= np.percentile(roi_values, 48))
+        candidates = connected_components(close_mask(dark), minimum=max(12, labels.size // 1000))
+        strip = np.zeros(labels.shape, dtype=bool)
+        strip[max(0, sy0 - max(6, sh // 5)):min(height, sy0 + max(4, sh // 8)), max(0, sx0 - sw):min(width, sx1 + sw)] = True
+        candidates = [item for item in candidates if (item["mask"] & strip).any() and item["area"] >= labels.size * .025 and item["bbox"][2] - item["bbox"][0] >= sw * 1.5]
+        if not candidates:
+            continue
+        canopy = max(candidates, key=lambda item: item["area"])["mask"] & background
+        if canopy.sum() < labels.size * .02:
+            continue
+        layer = describe_mask(canopy, labels, f"supported-prop-{index}", "prop-candidate", .72)
+        layers.append(layer); background &= ~canopy
+    return {**decomposition, "layers": layers, "backgroundMask": background}
+
+
 def mask_paths(mask):
     """Trace pixel-boundary loops; output polygons rather than scanline rectangles."""
     height, width = mask.shape
@@ -565,6 +600,109 @@ def luma(rgb):
     return value[..., 0] * 0.2126 + value[..., 1] * 0.7152 + value[..., 2] * 0.0722
 
 
+def erode_mask(mask, steps=2):
+    out = mask.copy()
+    for _ in range(steps):
+        padded = np.pad(out, 1, constant_values=False)
+        shrunk = out.copy()
+        for dy, dx in ((0, 1), (2, 1), (1, 0), (1, 2)):
+            shrunk &= padded[dy:dy + out.shape[0], dx:dx + out.shape[1]]
+        out = shrunk
+    return out
+
+
+def volume_evidence(result, mask):
+    """Measure whether a subject carries smooth, single-light shading (a volume cue) or is flat colour.
+
+    Uses the original pixels, not the quantised ones, and only region interiors so anti-aliasing
+    does not count as shading. One frame cannot prove volume: cel-shaded 3D can look flat, and
+    textured 2D art can look shaded, so the result is evidence with an explicit confidence.
+    """
+    # Measure on a higher-resolution copy: small subjects have no interior pixels at the analysis size.
+    frame = result.get("evidenceFrame")
+    labels = result["labels"]
+    if frame is None:
+        frame = result["frame"]
+    elif frame.shape[:2] != labels.shape:
+        rows = (np.arange(frame.shape[0]) * labels.shape[0] / frame.shape[0]).astype(int)
+        cols = (np.arange(frame.shape[1]) * labels.shape[1] / frame.shape[1]).astype(int)
+        mask, labels = mask[rows][:, cols], labels[rows][:, cols]
+    inner = erode_mask(mask, 2)
+    lum = luma(frame)
+    total = tonal = explained = 0.0
+    vectors, ramps = [], {}
+    ys_all, xs_all = np.nonzero(inner)
+    for label in np.unique(labels[inner]):
+        region = inner & (labels == label)
+        count = int(region.sum())
+        if count < 12:
+            continue
+        ys, xs = np.nonzero(region)
+        values = lum[ys, xs]
+        spread = float(values.std())
+        design = np.column_stack([np.ones(count), xs - xs.mean(), ys - ys.mean()])
+        coefficients, *_ = np.linalg.lstsq(design, values, rcond=None)
+        residual = float(((values - design @ coefficients) ** 2).mean())
+        variance = float(values.var())
+        total += count
+        tonal += spread * count
+        if variance > 1e-6:
+            explained += max(0.0, 1 - residual / variance) * count
+        gradient = np.array(coefficients[1:])
+        strength = float(np.hypot(*gradient)) * max(np.ptp(xs), np.ptp(ys), 1)
+        if strength > 0.02:
+            vectors.append(gradient / (np.hypot(*gradient) + 1e-12) * count)
+        mean_rgb = frame[ys, xs].reshape(-1, 3).mean(0) / 255
+        hue_bin = int(np.argmax(mean_rgb)) if mean_rgb.max() - mean_rgb.min() > 0.08 else 3
+        ramps.setdefault(hue_bin, []).append(float(values.mean()))
+    if total < 30:
+        return {"sufficient": False, "samples": int(total)}
+    # Across regions: a lit volume keeps one chromaticity while its luminance sweeps a wide range, smoothly in space.
+    pixels = frame[ys_all, xs_all].astype(np.float64) / 255
+    bright = pixels.sum(1)
+    keep = bright > 0.15
+    chroma = pixels[keep, :2] / bright[keep, None]
+    keys = np.floor(chroma / 0.05).astype(int)
+    cluster_ids = keys[:, 0] * 100 + keys[:, 1]
+    lum_values, cx, cy = lum[ys_all, xs_all][keep], xs_all[keep].astype(float), ys_all[keep].astype(float)
+    span_total = fit_total = weight = 0.0
+    for cluster in np.unique(cluster_ids):
+        pick = cluster_ids == cluster
+        count = int(pick.sum())
+        if count < 40:
+            continue
+        values = lum_values[pick]
+        span = float(np.percentile(values, 90) - np.percentile(values, 10))
+        x, y = cx[pick] - cx[pick].mean(), cy[pick] - cy[pick].mean()
+        design = np.column_stack([np.ones(count), x, y, x * y, x * x, y * y])
+        coefficients, *_ = np.linalg.lstsq(design, values, rcond=None)
+        variance = float(values.var())
+        fit = max(0.0, 1 - float(((values - design @ coefficients) ** 2).mean()) / variance) if variance > 1e-6 else 0.0
+        span_total += span * count
+        fit_total += fit * count
+        weight += count
+    tonal_variation = tonal / total
+    gradient_explained = explained / total
+    coherence = float(np.hypot(*np.sum(vectors, axis=0)) / (sum(np.hypot(*v) for v in vectors) + 1e-12)) if vectors else 0.0
+    steps = 0
+    for levels in ramps.values():
+        ordered = sorted(levels)
+        distinct = 1 + sum(1 for a, b in zip(ordered, ordered[1:]) if b - a > 0.05)
+        steps = max(steps, distinct)
+    light = None
+    if vectors:
+        v = np.sum(vectors, axis=0)
+        light = [rounded(v[0] / (np.hypot(*v) + 1e-12), 3), rounded(v[1] / (np.hypot(*v) + 1e-12), 3)]
+    return {
+        "sufficient": True, "samples": int(total),
+        "tonalVariation": rounded(tonal_variation), "gradientExplained": rounded(gradient_explained),
+        "lightCoherence": rounded(coherence), "toneRampSteps": int(steps),
+        "chromaLuminanceSpan": rounded(span_total / weight) if weight else 0.0,
+        "smoothShadingFit": rounded(fit_total / weight) if weight else 0.0,
+        "lightDirection2d": light,
+    }
+
+
 def block_ssim(a, b, block=8):
     a, b = luma(a), luma(b)
     values = []
@@ -633,7 +771,7 @@ def fit_frame(frame, temporal=None):
     # Error is 0..roughly 1. Complexity prevents selecting photographic frames that need thousands of tiny regions.
     selection_error = rmse / 255 + (1 - similarity) * 0.35 + (1 - edge) * 0.15 + min(0.5, complexity / 8000) + information_penalty
     structure = infer_structure(labels, palette)
-    decomposition = apply_temporal_layers(semantic_layers(labels, palette), temporal, labels)
+    decomposition = promote_supported_props(apply_temporal_layers(semantic_layers(labels, palette), temporal, labels), labels, palette)
     refined = fitted.copy()
     for layer in decomposition["layers"]:
         layer["localLabels"] = None
@@ -688,9 +826,11 @@ def analyze(path, temporal=None, quality="standard"):
     profile = QUALITY_PROFILES[quality]
     frame = read_rgb(path, profile["analysisLongSide"])
     result = fit_frame(frame, temporal)
+    evidence_frame = read_rgb(path, 960)
     while result["summary"]["regionCount"] > profile["regionBudget"] and min(frame.shape[:2]) > 48:
         frame = frame[::2, ::2]
         result = fit_frame(frame, temporal)
+    result["evidenceFrame"] = evidence_frame
     result["summary"]["regionBudget"] = profile["regionBudget"]
     result["summary"]["budgetMet"] = result["summary"]["regionCount"] <= profile["regionBudget"]
     return result
@@ -705,12 +845,73 @@ def svg_of(result):
     return f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" shape-rendering="crispEdges">{"".join(shapes)}</svg>\n'
 
 
-def path_data(loops, offset=(0, 0)):
+def simplify_loop(points, epsilon):
+    """Douglas-Peucker on a closed polyline (anchored at its two farthest-apart points)."""
+    count = len(points)
+    if count < 8:
+        return points
+    first = 0
+    second = int(np.argmax(np.linalg.norm(points - points[first], axis=1)))
+    def rdp(lo, hi, out):
+        if hi - lo < 2:
+            return
+        a, b = points[lo], points[hi % count]
+        d = b - a
+        norm = float(np.hypot(*d)) or 1e-9
+        idx = np.arange(lo + 1, hi) % count
+        dist = np.abs(d[0] * (points[idx, 1] - a[1]) - d[1] * (points[idx, 0] - a[0])) / norm
+        far = int(np.argmax(dist))
+        if dist[far] > epsilon:
+            mid = lo + 1 + far
+            rdp(lo, mid, out); out.append(mid); rdp(mid, hi, out)
+    keep = [first]
+    rdp(first, second, keep); keep.append(second)
+    rdp(second, first + count, keep)
+    return points[sorted(set(keep))]
+
+
+def smooth_loop(points, bounds, passes=None, spacing=0.5):
+    """Relax pixel stair-steps with Taubin (shrink-free) smoothing of a resampled outline.
+
+    Points on the asset border stay pinned so backdrops still tile edge to edge.
+    """
+    width, height = bounds
+    pts = np.asarray(points, dtype=float)
+    turn = np.cross(pts - np.roll(pts, 1, axis=0), np.roll(pts, -1, axis=0) - pts)
+    corners = pts[np.abs(turn) > 1e-9]
+    if len(corners) <= 4 and max(np.ptp(pts[:, 0]), np.ptp(pts[:, 1])) > 3:
+        return [tuple(p) for p in corners]  # a large axis-aligned rectangle is already exact
+    if passes is None:  # larger shapes tolerate (and need) a wider smoothing radius
+        extent = float(max(np.ptp(pts[:, 0]), np.ptp(pts[:, 1])))
+        passes = int(min(48, 8 + extent / 3))
+    spans = np.linalg.norm(np.roll(pts, -1, axis=0) - pts, axis=1)
+    dense = []
+    for index, length in enumerate(spans):
+        a, b = pts[index], pts[(index + 1) % len(pts)]
+        steps = max(1, int(round(length / spacing)))
+        dense.extend(a + (b - a) * (k / steps) for k in range(steps))
+    dense = np.array(dense)
+    pinned = (dense[:, 0] <= 0) | (dense[:, 0] >= width) | (dense[:, 1] <= 0) | (dense[:, 1] >= height)
+    free = ~pinned
+    if free.sum() < 3:
+        return points
+    for _ in range(passes):
+        for factor in (0.5, -0.53):
+            average = (np.roll(dense, 1, axis=0) + np.roll(dense, -1, axis=0)) / 2
+            dense[free] += factor * (average[free] - dense[free])
+    dense[:, 0] = np.clip(dense[:, 0], 0, width)
+    dense[:, 1] = np.clip(dense[:, 1], 0, height)
+    return [tuple(p) for p in simplify_loop(dense, 0.06)]
+
+
+def path_data(loops, offset=(0, 0), bounds=None, smooth=True):
     ox, oy = offset
     commands = []
     for loop in loops:
         points = [(x - ox, y - oy) for x, y in loop]
-        commands.append("M" + "L".join(f"{x},{y}" for x, y in points) + "Z")
+        if smooth and bounds:
+            points = smooth_loop(points, bounds)
+        commands.append("M" + "L".join(f"{x:.2f},{y:.2f}".replace(".00", "") for x, y in points) + "Z")
     return "".join(commands)
 
 
@@ -723,9 +924,10 @@ def svg_paths(result, mask, bbox=None, label_map=None, local_palette=None):
     source_labels = label_map if label_map is not None else labels
     source_palette = local_palette if local_palette is not None else palette
     for label in np.unique(source_labels[mask]):
-        data = path_data(mask_paths(mask & (source_labels == label)), (x0, y0))
+        data = path_data(mask_paths(mask & (source_labels == label)), (x0, y0), (x1 - x0, y1 - y0))
         if data:
-            parts.append(f'<path d="{data}" fill="{hex_color(source_palette[int(label)])}"/>')
+            colour = hex_color(source_palette[int(label)])
+            parts.append(f'<path d="{data}" fill="{colour}" stroke="{colour}" stroke-width="0.5" stroke-linejoin="round"/>')
     return "".join(parts)
 
 
@@ -736,6 +938,28 @@ def svg_asset(result, mask, bbox=None, label_map=None, local_palette=None):
     x0, y0, x1, y1 = bbox
     parts = svg_paths(result, mask, bbox, label_map, local_palette)
     return f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {x1 - x0} {y1 - y0}" shape-rendering="geometricPrecision">{"".join(parts)}</svg>\n'
+
+
+def opaque_background_svg(result):
+    """Fill each removed measured layer with its dominant immediate surround."""
+    background = result["decomposition"]["backgroundMask"]
+    filled = result["labels"].copy()
+    height, width = background.shape
+    fallback = int(np.bincount(filled[background]).argmax()) if background.any() else 0
+    for layer in result["decomposition"]["layers"]:
+        mask = layer["mask"]
+        expanded = mask.copy()
+        for _ in range(6):
+            padded = np.pad(expanded, 1, constant_values=False)
+            grown = expanded.copy()
+            for dy in range(3):
+                for dx in range(3):
+                    grown |= padded[dy:dy + height, dx:dx + width]
+            expanded = grown
+        ring = expanded & ~mask
+        label = int(np.bincount(result["labels"][ring]).argmax()) if ring.any() else fallback
+        filled[mask] = label
+    return svg_asset(result, np.ones((height, width), dtype=bool), label_map=filled, local_palette=result["palette"])
 
 
 def semantic_svg(result):
@@ -919,7 +1143,7 @@ def aikiscene_package(result, quality):
     detected = result["decomposition"]["layers"][:max(0, profile["maxLayers"] - 1)]
     records = [{
         "id": "background", "role": "background", "confidence": 1.0,
-        "bbox": [0, 0, width, height], "svg": svg_asset(result, result["decomposition"]["backgroundMask"]), "z": -1.0,
+        "bbox": [0, 0, width, height], "svg": opaque_background_svg(result), "z": -1.0,
         "backingColor": hex_color(result["palette"][result["structure"]["sky"]]),
     }]
     for index, item in enumerate(detected):
@@ -932,23 +1156,37 @@ def aikiscene_package(result, quality):
             "backingColor": hex_color(item["localPalette"][0]) if item["localPalette"] is not None and len(item["localPalette"]) else "#303030",
         })
 
-    assets, layers = {}, []
+    assets, layers, primitives = {}, [], []
     tangent = math.tan(math.radians(fov / 2))
+    focal = 1 / tangent
+    background_asset = "svg-background"
+    world = world3d.build_world(width, height, fov, result["structure"], background_asset, hex_color(result["palette"][result["structure"]["sky"]]), hex_color(result["palette"][result["structure"]["ground"]]))
+    shift = world["horizonNdc"]
     for record in records:
         x0, y0, x1, y1 = record["bbox"]
-        distance = camera_z - record["z"]
+        is_background = record["id"] == "background"
+        on_ground = False
+        if is_background:
+            distance = world3d.WALL_DISTANCE
+        else:
+            distance, on_ground = world3d.place_layer(world, record["bbox"], (width, height), focal, len(layers), record["role"])
+        record["z"] = world3d.CAMERA_Z - distance
         view_height, view_width = 2 * distance * tangent, 2 * distance * tangent * aspect
         centre_x, centre_y = (x0 + x1) / 2 / width, (y0 + y1) / 2 / height
+        size = [(x1 - x0) / width * view_width, (y1 - y0) / height * view_height]
+        position = [(centre_x - 0.5) * view_width, (0.5 - centre_y) * view_height - shift * view_height / 2, record["z"]]
         asset_id = f'svg-{record["id"]}'
         assets[asset_id] = {"mediaType": "image/svg+xml", "encoding": "utf8", "content": record["svg"]}
+        thickness = 0.025 if is_background else world3d.layer_thickness(record["role"], size, on_ground)
+        if on_ground:
+            primitives.append(world3d.contact_shadow(record["id"], position[0], world["ground"]["y"], position[2] - thickness / 2, size[0]))
         layers.append({
             "id": record["id"], "name": record["id"].replace("-", " ").title(), "role": record["role"], "assetId": asset_id,
-            "transform": {
-                "position": [rounded((centre_x - 0.5) * view_width), rounded((0.5 - centre_y) * view_height), rounded(record["z"])],
-                "rotation": [0, 0, 0], "scale": [1, 1, 1],
-            },
-            "size": [rounded((x1 - x0) / width * view_width), rounded((y1 - y0) / height * view_height)],
-            "thickness": 0.025, "backingColor": record["backingColor"], "depthOrder": len(layers),
+            "transform": {"position": [rounded(value) for value in position], "rotation": [0, 0, 0], "scale": [1, 1, 1]},
+            "size": [rounded(size[0]), rounded(size[1])],
+            "thickness": thickness, "backingMode": "none" if is_background else "solid", "backingColor": record["backingColor"], "depthOrder": len(layers),
+            "depth": {"distance": rounded(distance, 3), "standingOnGround": on_ground, "method": "backdrop" if is_background else "ground-contact" if on_ground else "far-backdrop"},
+            "projectedBackdrop": is_background,
             "confidence": record["confidence"], "sourceBoundsPx": [x0, y0, x1 - x0, y1 - y0], "optional": False,
         })
 
@@ -959,8 +1197,9 @@ def aikiscene_package(result, quality):
         "coordinateSystem": "threejs-y-up",
         "quality": {"profile": quality, **profile, "requestedFeatures": {"shadows": False, "antialiasing": "standard" if quality == "standard" else "high", "contourDetail": "balanced" if quality == "standard" else "detailed"}},
         "canvas": {"widthPx": width, "heightPx": height, "aspect": f"{width}:{height}"},
-        "camera": {"projection": "perspective", "position": [0, 0, camera_z], "target": [0, 0, 0], "verticalFovDeg": fov, "near": 0.1, "far": 100, "confidence": rounded(result["structure"]["confidence"], 3), "framingErrorPx": 0, "method": "analytic-screen-space-fit"},
-        "layers": layers, "primitives": [], "assets": assets,
+        "camera": {"projection": "perspective", "position": [0, 0, camera_z], "target": [0, 0, 0], "verticalFovDeg": fov, "near": 0.1, "far": 100, "lensShiftNdcY": world["horizonNdc"], "confidence": rounded(result["structure"]["confidence"], 3), "framingErrorPx": 0, "method": "analytic-screen-space-fit"},
+        "world": world,
+        "layers": layers, "primitives": primitives, "assets": assets,
         "validation": {"structuralSimilarity": result["summary"]["structuralSimilarity"], "edgeF1": result["summary"]["edgeF1"], "supported": supported, "warnings": warnings},
     }
 
@@ -1037,7 +1276,7 @@ def export(result, source, output_dir, quality="standard"):
             "runtimeDrawCalls": {"value": (4 + len(result["structure"]["buildings"])) if hybrid else len(layer_records) if layered else 1, "unit": "draw-calls", "method": "hybrid-primitives" if hybrid else "semantic-svg-layers" if layered else "single-svg-plane", "confidence": 1, "samples": 1, "status": "derived"},
         },
         "components": {
-            "character": {"available": result["structure"]["character"] is not None, "representation": "svg-billboard" if hybrid else "unseparated", "boundsPx": result["structure"]["character"]["bbox"] if result["structure"]["character"] else None},
+            "character": {"available": result["structure"]["character"] is not None, "representation": "svg-billboard" if hybrid else "unseparated", "boundsPx": result["structure"]["character"]["bbox"] if result["structure"]["character"] else None, **({"volumeEvidence": volume_evidence(result, result["structure"]["character"]["mask"])} if result["structure"]["character"] else {})},
             "world": {"available": hybrid, "representation": "three-primitives" if hybrid else "unseparated", "buildingCount": len(result["structure"]["buildings"]), "buildingBoundsPx": [item["bbox"] for item in result["structure"]["buildings"]]},
             "sun": {"available": result["structure"]["sun"] is not None, "representation": "circle-geometry" if hybrid else "unseparated", "boundsPx": result["structure"]["sun"]["bbox"] if result["structure"]["sun"] else None},
             "horizonY": measurement(result["structure"]["horizon"], "px", "dominant-ground-row", result["summary"]["height"], result["structure"]["confidence"]),
@@ -1045,6 +1284,7 @@ def export(result, source, output_dir, quality="standard"):
                 "id": item["id"], "role": item["role"], "confidence": rounded(item["confidence"], 3),
                 "boundsPx": item["bbox"], "areaPx": item["area"],
                 "palette": [hex_color(colour) for colour in item["localPalette"]] if item["localPalette"] is not None else [hex_color(result["palette"][label]) for label in item["labels"]],
+                **({"volumeEvidence": volume_evidence(result, item["mask"])} if item["role"] in {"subject-candidate", "character-candidate"} else {}),
                 **({"family": item["family"]} if item["family"] else {}),
                 **({"track": item["track"]} if item.get("track") else {}),
                 "asset": f'assets/{item["id"]}.svg' if layered else None,

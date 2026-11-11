@@ -11,7 +11,7 @@ const port = Number(process.env.PORT || 8788);
 const types = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8', '.aikiscene': 'application/json; charset=utf-8', '.svg': 'image/svg+xml', '.jpg': 'image/jpeg', '.png': 'image/png', '.md': 'text/markdown; charset=utf-8' };
 
 // Only the app itself and finished study artefacts are served; never the repo, sources or downloaded videos.
-const PUBLIC = [/^index\.html$/, /^styles\.css$/, /^src\/[a-z0-9-]+\.js$/, /^examples\/[a-z0-9.-]+\.svg$/,
+const PUBLIC = [/^index\.html$/, /^viewer\.html$/, /^vendor\/three\/(build\/three\.(module|core)\.js|examples\/jsm\/(loaders\/SVGLoader|controls\/OrbitControls)\.js)$/, /^styles\.css$/, /^src\/[a-z0-9-]+\.js$/, /^examples\/[a-z0-9.-]+\.svg$/,
   /^workspaces\/[a-z0-9-]+\/(motion-style-blueprint\.json|summary\.md|pack\/(pack\.json|style-guide\.md)|evidence\/[a-z0-9_-]+\.jpg|reconstruction\/(visual-reconstruction-blueprint\.json|scene\.aikiscene|(reconstruction|character)\.svg|reconstruction\.png|reference\.png|scene\.js))$/];
 
 // The API is for this page only: same-origin, JSON, and a Host we expect (blocks other websites and DNS rebinding).
@@ -56,8 +56,10 @@ createServer(async (request, response) => {
   try {
     const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
     if (url.pathname.startsWith('/api/')) return await api(request, response, url);
-    const relative = normalize(decodeURIComponent(url.pathname === '/' ? 'index.html' : url.pathname.slice(1))).split(sep).join('/');
-    if (!PUBLIC.some(pattern => pattern.test(relative)) || !(await stat(join(root, relative))).isFile()) throw new Error('Not found');
+    let relative = normalize(decodeURIComponent(url.pathname === '/' ? 'index.html' : url.pathname.slice(1))).split(sep).join('/');
+    if (!PUBLIC.some(pattern => pattern.test(relative))) throw new Error('Not found');
+    if (relative.startsWith('vendor/three/')) relative = `node_modules/three/${relative.slice('vendor/three/'.length)}`;
+    if (!(await stat(join(root, relative))).isFile()) throw new Error('Not found');
     response.writeHead(200, { 'content-type': types[extname(relative)] || 'application/octet-stream', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
     response.end(await readFile(join(root, relative)));
   } catch (error) {

@@ -26,8 +26,19 @@ export function validateAikiScene(scene) {
     if (asset.mediaType !== 'image/svg+xml' || typeof asset.content !== 'string') errors.push(`invalid asset: ${id}`);
     else if (unsafeSvg.test(asset.content)) errors.push(`unsafe SVG asset: ${id}`);
   }
+  if (scene?.world) {
+    const numbers = [scene.world.horizonNdc, scene.world.cameraHeight, scene.world.nearDistance, scene.world.wallDistance, scene.world.ground?.y, scene.world.wall?.z, scene.camera?.lensShiftNdcY];
+    if (numbers.some(value => !Number.isFinite(value))) errors.push('world measurements must be finite numbers');
+    for (const key of ['ground', 'wall']) if (!scene.assets?.[scene.world[key]?.assetId]) errors.push(`world.${key} references a missing asset`);
+  }
+  for (const layer of scene?.layers || []) {
+    if (!Number.isFinite(layer.thickness) || layer.thickness < 0) errors.push(`invalid layer thickness: ${layer.id}`);
+  }
   for (const subject of scene?.subjects || []) {
     if (!subject.id || !subject.classification || !subject.selectedStrategy) errors.push('subject classification is incomplete');
+    if (subject.dimensionality && !['flat-2d-sprite', 'volumetric-3d', 'uncertain'].includes(subject.dimensionality.class)) errors.push(`unknown dimensionality: ${subject.id}`);
+    if (![undefined, null, '2d', '3d'].includes(subject.handoff?.choice?.selected)) errors.push(`invalid character choice: ${subject.id}`);
+    if (subject.handoff && !['aikistudio-2d-character', 'aikistudio-3d-character', 'needs-choice'].includes(subject.handoff.target)) errors.push(`unknown handoff target: ${subject.id}`);
     const numbers = [...(subject.boundsPx || []), subject.classificationConfidence];
     if (numbers.some(value => !Number.isFinite(value))) errors.push(`non-finite subject measurement: ${subject.id}`);
   }
@@ -44,6 +55,90 @@ export async function loadAikiScene(path) {
 
 function assetRecords(subject) {
   return [...(subject.parts || []), ...(subject.bones || [])];
+}
+
+const handoffTargets = { 'volumetric-3d': 'aikistudio-3d-character', 'flat-2d-sprite': 'aikistudio-2d-character', uncertain: 'needs-choice' };
+const userChoices = { '2d': 'aikistudio-2d-character', '3d': 'aikistudio-3d-character' };
+
+/**
+ * The handshake: what AikiStudio needs to route a recovered subject into its own character tools.
+ * Style Lab measures and classifies; AikiStudio owns character creation, rigging and animation.
+ */
+export function characterHandoff(scene, subject, selected = null) {
+  const layer = scene.layers.find(item => item.id === subject.sourceLayer);
+  const kind = subject.dimensionality?.class || 'uncertain';
+  const [width, height] = layer?.size || [1, 1];
+  const [x, y, z] = layer?.transform?.position || [0, 0, 0];
+  const standing = Boolean(layer?.depth?.standingOnGround);
+  const bounds = subject.boundsPx;
+  return {
+    version: 'aikistudio.character-handoff/v1',
+    target: selected ? userChoices[selected] : handoffTargets[kind], defaultTarget: 'aikistudio-2d-character',
+    // The measurement is a hint; the person decides. `selected` ('2d' | '3d') always wins over the measured class.
+    choice: { options: ['2d', '3d'], suggested: kind === 'volumetric-3d' ? '3d' : kind === 'flat-2d-sprite' ? '2d' : null, selected, source: selected ? 'user' : 'unset' },
+    dimensionality: kind, confidence: subject.dimensionality?.confidence ?? 0,
+    placeholder: { layerId: layer?.id ?? null, assetId: layer?.assetId ?? null, treatment: 'extruded-cutout', replaceWhenCharacterExists: true },
+    anchor: {
+      feetPosition: [x, standing && scene.world ? scene.world.ground.y : y - height / 2, z],
+      heightMeters: height, widthMeters: width, standingOnGround: standing,
+      distanceFromCamera: layer?.depth?.distance ?? null, facing: 'camera',
+    },
+    reference: {
+      assetId: layer?.assetId ?? null, boundsPx: bounds, paletteHex: subject.paletteHex || [],
+      proportions: { aspectRatio: subject.features?.aspectRatio, elongation: subject.features?.elongation },
+      lightDirection2d: subject.dimensionality?.evidence?.lightDirection2d ?? null,
+    },
+    rig: (selected ? selected === '3d' : kind === 'volumetric-3d') ? null : {
+      strategy: subject.selectedStrategy, partIds: (subject.parts || subject.bones || []).map(item => item.id), supportedMotion: subject.supportedMotion,
+    },
+    notes: (selected ? selected === '3d' : kind === 'volumetric-3d')
+      ? ['Hidden sides are not recovered; build the character in AikiStudio from the reference and proportions.']
+      : !selected && kind === 'uncertain' ? ['Evidence is ambiguous; ask the user and default to the 2D sprite.'] : [],
+  };
+}
+
+function sceneEntities(scene, subjects) {
+  const subjectLayerIds = new Set(subjects.map(subject => subject.sourceLayer));
+  const entities = subjects.map((subject, index) => {
+    const source = scene.layers.find(layer => layer.id === subject.sourceLayer);
+    return {
+      id: `entity-${subject.id}`, name: index === 0 ? 'Recovered character' : 'Recovered creature',
+      kind: subject.selectedStrategy === 'spline-bands' ? 'creature' : 'actor', strategy: subject.selectedStrategy,
+      sourceLayerIds: [subject.sourceLayer], size: source?.size || [1, 1], transform: source?.transform,
+      confidence: subject.classificationConfidence, motion: subject.motion,
+      parts: assetRecords(subject).map(record => ({ id: record.id, assetId: record.assetId, pivotNormalized: record.pivotNormalized, layerOrder: record.layerOrder })),
+    };
+  });
+  const supports = scene.layers.filter(layer => layer.role === 'static-support');
+  for (const [index, support] of supports.entries()) {
+    const [sx, sy, sw, sh] = support.sourceBoundsPx;
+    const candidates = scene.layers.filter(layer => {
+      if (subjectLayerIds.has(layer.id) || layer.role === 'background' || layer.role === 'environment-region') return false;
+      const [x, y, w, h] = layer.sourceBoundsPx;
+      const cx = x + w / 2, cy = y + h / 2;
+      return layer.id === support.id || (cx >= sx - sw * 2 && cx <= sx + sw * 3 && cy >= sy - sh * 2 && cy <= sy + sh && ['repeated-prop', 'prop-candidate'].includes(layer.role));
+    });
+    if (candidates.length < 2) continue;
+    entities.push({
+      id: `entity-prop-${index + 1}`, name: `Recovered prop ${index + 1}`, kind: 'prop', strategy: 'layer-group',
+      sourceLayerIds: candidates.map(layer => layer.id), transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+      confidence: Math.min(...candidates.map(layer => layer.confidence || .5)),
+      parts: candidates.map(layer => ({ id: layer.id, assetId: layer.assetId, size: layer.size, position: layer.transform.position, layerOrder: layer.depthOrder || 0 })),
+    });
+  }
+  return entities;
+}
+
+/** Record the user's 2D/3D decision for one subject; rebuilds its handoff and the package digest. */
+export function applyCharacterChoice(scene, subjectId, choice) {
+  if (choice !== null && !(choice in userChoices)) throw new Error(`choice must be '2d', '3d' or null, got ${choice}`);
+  const subject = scene.subjects?.find(item => item.id === subjectId);
+  if (!subject) throw new Error(`unknown subject: ${subjectId}`);
+  subject.handoff = characterHandoff(scene, subject, choice);
+  scene.packageDigest = digest(scene);
+  const validation = validateAikiScene(scene);
+  if (!validation.valid) throw new Error(`Invalid .aikiscene after choice: ${validation.errors.join('; ')}`);
+  return scene;
 }
 
 export async function embedRigInAikiScene({ scenePath, rigPath, outputPath = scenePath }) {
@@ -66,13 +161,16 @@ export async function embedRigInAikiScene({ scenePath, rigPath, outputPath = sce
       record.assetId = assetId;
     }
   }
+  const previous = new Map((scene.subjects || []).map(item => [item.id, item.handoff?.choice?.selected]));
   scene.subjects = subjects;
+  for (const subject of subjects) subject.handoff = characterHandoff(scene, subject, previous.get(subject.id) ?? null);
   scene.reconstructionObjects = structuredClone(rig.objects || []);
   scene.reconstructionStrategy = rig.sceneStrategy;
   scene.rigs = subjects.map(subject => ({
     id: `rig-${subject.id}`, subjectId: subject.id, type: subject.selectedStrategy,
     parts: (subject.parts || subject.bones || []).map(record => record.id),
   }));
+  scene.entities = sceneEntities(scene, subjects);
   scene.animations = [{ id: 'measured-new-pose', ...rig.animation }];
   scene.package = { format: 'single-json', extension: '.aikiscene', executableCode: false, remoteAssets: false };
   scene.packageDigest = digest(scene);
