@@ -125,9 +125,19 @@ export function buildHandoffs(scene, choices = new Map()) {
     const boxes = layers.map(layer => ({ left: layer.transform.position[0] - layer.size[0] / 2, right: layer.transform.position[0] + layer.size[0] / 2, bottom: layer.transform.position[1] - layer.size[1] / 2, top: layer.transform.position[1] + layer.size[1] / 2 }));
     const union = boxes.length ? { left: Math.min(...boxes.map(b => b.left)), right: Math.max(...boxes.map(b => b.right)), bottom: Math.min(...boxes.map(b => b.bottom)), top: Math.max(...boxes.map(b => b.top)) } : null;
     const primaryLayer = scene.layers.find(item => item.id === primary.sourceLayer);
+    // Small unclassified pieces touching the figure (a head, a hand) belong to it; larger layers are scenery.
+    const memberLayerIds = new Set(members.map(member => member.sourceLayer));
+    const ownedBySubjects = new Set(scene.subjects.map(item => item.sourceLayer));
+    const unionPx = [Math.min(...members.map(m => m.boundsPx[0])), Math.min(...members.map(m => m.boundsPx[1])), Math.max(...members.map(m => m.boundsPx[2])), Math.max(...members.map(m => m.boundsPx[3]))];
+    const unionArea = (unionPx[2] - unionPx[0]) * (unionPx[3] - unionPx[1]);
+    const absorbed = scene.layers.filter(layer => {
+      if (memberLayerIds.has(layer.id) || ownedBySubjects.has(layer.id) || ['background', 'environment-region', 'static-support'].includes(layer.role) || !layer.sourceBoundsPx) return false;
+      const [x, y, w, h] = layer.sourceBoundsPx;
+      return w * h <= unionArea * .6 && boundsGap([x, y, x + w, y + h], unionPx) <= 2;
+    }).map(layer => layer.id);
     for (const member of members) {
       const isPrimary = member === primary, group = { id: `character-group-${index + 1}`, memberIds: members.map(item => item.id), primary: isPrimary };
-      const resolved = { kind, group };
+      const resolved = { kind, group: { ...group, absorbedLayerIds: absorbed } };
       if (isPrimary && union && members.length > 1) {
         resolved.size = [union.right - union.left, union.top - union.bottom];
         resolved.centre = [(union.left + union.right) / 2, (union.top + union.bottom) / 2, primaryLayer?.transform?.position?.[2] ?? 0];

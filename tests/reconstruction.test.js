@@ -269,6 +269,7 @@ for name, shaded in (('flat', False), ('shaded', True)):
   const groupIds = new Set(shadedScene.subjects.map(item => item.handoff.group.id));
   assert.equal(groupIds.size, 1, 'the fragments of one figure share a group');
   assert.equal(shadedScene.subjects.filter(item => item.handoff.group.primary).length, 1);
+  assert.ok(shadedScene.subjects.every(item => Array.isArray(item.handoff.group.absorbedLayerIds)), 'small pieces inside the figure are listed so they can be hidden with it');
   const lone = shadedScene.subjects.find(item => !item.handoff.group.primary);
   if (lone) { applyCharacterChoice(shadedScene, lone.id, '2d'); assert.ok(shadedScene.subjects.every(item => item.handoff.choice.selected === '2d'), 'a choice on any piece applies to the whole figure'); applyCharacterChoice(shadedScene, lone.id, null); }
 
