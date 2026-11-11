@@ -37,6 +37,14 @@ function init() {
     presetId = event.target.value; state = copy(PRESETS[presetId]); dirty = false; hydrate(); toast('Starting system loaded');
   });
   $('#startAnalysis').addEventListener('click', runStudy);
+  for (const [id, kind] of [['pickFolder', 'folder'], ['pickFile', 'file']]) $(`#${id}`).addEventListener('click', async () => {
+    try {
+      const r = await (await fetch('/api/pick', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ kind }) })).json();
+      if (r.error) return toast(r.error);
+      if (r.path) $('#sourceInput').value = r.path;
+    } catch (error) { toast(error.message); }
+  });
+  $('#exportScene').addEventListener('click', () => $('#exportAikiScene').click());
   $('#palette').addEventListener('input', event => { const card = event.target.closest('[data-palette]'); if (!card) return; const index = Number(card.dataset.palette), field = event.target.dataset.field; state.palette[index][field] = field === 'share' ? Number(event.target.value) : event.target.value; render(); });
   $('#shots').addEventListener('input', event => updateShot(event));
   $('#shots').addEventListener('click', event => { const button = event.target.closest('[data-remove-shot]'); if (!button) return; state.shotGrammar.splice(Number(button.dataset.removeShot), 1); render(); });

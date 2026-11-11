@@ -186,3 +186,5 @@ main { grid-template-columns:220px minmax(540px,1fr) 390px; min-height:calc(100v
 @keyframes analysis-pulse { from { opacity:.45; } to { opacity:1; } }
 dialog { background:#fff; }
 @media(max-width:1100px){.app-tab-nav{display:none}.reference-grid{grid-template-columns:1fr}.workflow-steps{grid-template-columns:1fr}.source-console{grid-template-columns:1fr 1fr}.source-url{grid-column:1/-1}}
+
+.pick-row{display:flex;gap:8px;margin-top:8px}.pick-row button{padding:6px 12px;border-radius:8px;border:1px solid currentColor;background:transparent;color:inherit;cursor:pointer}

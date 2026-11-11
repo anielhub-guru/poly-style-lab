@@ -3,6 +3,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import { runCommand } from './src/commands.js';
 import { studyStatus } from './src/study.js';
 
@@ -43,6 +44,13 @@ async function api(request, response, url) {
     const studyId = `study-${randomBytes(4).toString('hex')}`;
     const started = await runCommand('style_analyze_channel', { source, videoCount: input.videoCount, reconstructionQuality: input.reconstructionQuality, name: input.name, background: true, outputDir: join(root, 'workspaces', studyId) });
     return json(response, 202, { studyId, ...started });
+  }
+  if (request.method === 'POST' && url.pathname === '/api/pick') {
+    const { kind } = await readBody(request);
+    const script = kind === 'file' ? 'POSIX path of (choose file with prompt "Choose a video")' : 'POSIX path of (choose folder with prompt "Choose a folder of videos")';
+    if (process.platform !== 'darwin') return json(response, 501, { error: 'Native picker is macOS only: paste a path instead.' });
+    const picked = await new Promise(resolve => execFile('osascript', ['-e', script], { timeout: 300_000 }, (error, stdout) => resolve(error ? null : stdout.trim().replace(/\/$/, ''))));
+    return json(response, 200, { path: picked });
   }
   const match = url.pathname.match(/^\/api\/analyze\/([a-z0-9-]+)$/);
   if (request.method === 'GET' && match) {
