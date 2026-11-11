@@ -64,11 +64,11 @@ const userChoices = { '2d': 'aikistudio-2d-character', '3d': 'aikistudio-3d-char
  * The handshake: what AikiStudio needs to route a recovered subject into its own character tools.
  * Style Lab measures and classifies; AikiStudio owns character creation, rigging and animation.
  */
-export function characterHandoff(scene, subject, selected = null) {
+export function characterHandoff(scene, subject, selected = null, resolved = {}) {
   const layer = scene.layers.find(item => item.id === subject.sourceLayer);
-  const kind = subject.dimensionality?.class || 'uncertain';
-  const [width, height] = layer?.size || [1, 1];
-  const [x, y, z] = layer?.transform?.position || [0, 0, 0];
+  const kind = resolved.kind || subject.dimensionality?.class || 'uncertain';
+  const [width, height] = resolved.size || layer?.size || [1, 1];
+  const [x, y, z] = resolved.centre || layer?.transform?.position || [0, 0, 0];
   const standing = Boolean(layer?.depth?.standingOnGround);
   const bounds = subject.boundsPx;
   return {
@@ -77,6 +77,7 @@ export function characterHandoff(scene, subject, selected = null) {
     // The measurement is a hint; the person decides. `selected` ('2d' | '3d') always wins over the measured class.
     choice: { options: ['2d', '3d'], suggested: kind === 'volumetric-3d' ? '3d' : kind === 'flat-2d-sprite' ? '2d' : null, selected, source: selected ? 'user' : 'unset' },
     dimensionality: kind, confidence: subject.dimensionality?.confidence ?? 0,
+    ...(resolved.group ? { group: resolved.group } : {}),
     placeholder: { layerId: layer?.id ?? null, assetId: layer?.assetId ?? null, treatment: 'extruded-cutout', replaceWhenCharacterExists: true },
     anchor: {
       feetPosition: [x, standing && scene.world ? scene.world.ground.y : y - height / 2, z],
@@ -95,6 +96,45 @@ export function characterHandoff(scene, subject, selected = null) {
       ? ['Hidden sides are not recovered; build the character in AikiStudio from the reference and proportions.']
       : !selected && kind === 'uncertain' ? ['Evidence is ambiguous; ask the user and default to the 2D sprite.'] : [],
   };
+}
+
+const boundsGap = (a, b) => Math.max(0, a[0] - b[2], b[0] - a[2], a[1] - b[3], b[1] - a[3]);
+
+/**
+ * One drawn or rendered figure is often cut into several adjacent layers. Subjects whose bounds touch are one
+ * character: they share a decision, and the largest piece carries the anchor of the whole union.
+ */
+export function groupSubjects(subjects, gapPx = 2) {
+  const parent = subjects.map((_, index) => index);
+  const find = index => parent[index] === index ? index : (parent[index] = find(parent[index]));
+  subjects.forEach((a, i) => subjects.forEach((b, j) => { if (j > i && boundsGap(a.boundsPx, b.boundsPx) <= gapPx) parent[find(j)] = find(i); }));
+  const groups = new Map();
+  subjects.forEach((subject, index) => { const key = find(index); groups.set(key, [...(groups.get(key) || []), subject]); });
+  return [...groups.values()];
+}
+
+/** (Re)build every subject's handoff, grouping touching fragments into one character. `choices` maps subject id to '2d' | '3d'. */
+export function buildHandoffs(scene, choices = new Map()) {
+  const area = subject => (subject.boundsPx[2] - subject.boundsPx[0]) * (subject.boundsPx[3] - subject.boundsPx[1]);
+  groupSubjects(scene.subjects || []).forEach((members, index) => {
+    const leader = [...members].sort((a, b) => (b.dimensionality?.volumeScore ?? -1) - (a.dimensionality?.volumeScore ?? -1))[0];
+    const primary = [...members].sort((a, b) => area(b) - area(a))[0];
+    const selected = members.map(member => choices.get(member.id)).find(Boolean) ?? null;
+    const kind = leader.dimensionality?.class || 'uncertain';
+    const layers = members.map(member => scene.layers.find(item => item.id === member.sourceLayer)).filter(Boolean);
+    const boxes = layers.map(layer => ({ left: layer.transform.position[0] - layer.size[0] / 2, right: layer.transform.position[0] + layer.size[0] / 2, bottom: layer.transform.position[1] - layer.size[1] / 2, top: layer.transform.position[1] + layer.size[1] / 2 }));
+    const union = boxes.length ? { left: Math.min(...boxes.map(b => b.left)), right: Math.max(...boxes.map(b => b.right)), bottom: Math.min(...boxes.map(b => b.bottom)), top: Math.max(...boxes.map(b => b.top)) } : null;
+    const primaryLayer = scene.layers.find(item => item.id === primary.sourceLayer);
+    for (const member of members) {
+      const isPrimary = member === primary, group = { id: `character-group-${index + 1}`, memberIds: members.map(item => item.id), primary: isPrimary };
+      const resolved = { kind, group };
+      if (isPrimary && union && members.length > 1) {
+        resolved.size = [union.right - union.left, union.top - union.bottom];
+        resolved.centre = [(union.left + union.right) / 2, (union.top + union.bottom) / 2, primaryLayer?.transform?.position?.[2] ?? 0];
+      }
+      member.handoff = characterHandoff(scene, member, selected, resolved);
+    }
+  });
 }
 
 function sceneEntities(scene, subjects) {
@@ -134,7 +174,9 @@ export function applyCharacterChoice(scene, subjectId, choice) {
   if (choice !== null && !(choice in userChoices)) throw new Error(`choice must be '2d', '3d' or null, got ${choice}`);
   const subject = scene.subjects?.find(item => item.id === subjectId);
   if (!subject) throw new Error(`unknown subject: ${subjectId}`);
-  subject.handoff = characterHandoff(scene, subject, choice);
+  const choices = new Map(scene.subjects.map(item => [item.id, item.handoff?.choice?.selected]));
+  for (const id of subject.handoff?.group?.memberIds || [subject.id]) choices.set(id, choice);   // a figure cut into pieces shares one decision
+  buildHandoffs(scene, choices);
   scene.packageDigest = digest(scene);
   const validation = validateAikiScene(scene);
   if (!validation.valid) throw new Error(`Invalid .aikiscene after choice: ${validation.errors.join('; ')}`);
@@ -163,7 +205,7 @@ export async function embedRigInAikiScene({ scenePath, rigPath, outputPath = sce
   }
   const previous = new Map((scene.subjects || []).map(item => [item.id, item.handoff?.choice?.selected]));
   scene.subjects = subjects;
-  for (const subject of subjects) subject.handoff = characterHandoff(scene, subject, previous.get(subject.id) ?? null);
+  buildHandoffs(scene, new Map([...previous].filter(([, value]) => value)));
   scene.reconstructionObjects = structuredClone(rig.objects || []);
   scene.reconstructionStrategy = rig.sceneStrategy;
   scene.rigs = subjects.map(subject => ({

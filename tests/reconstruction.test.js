@@ -265,6 +265,13 @@ for name, shaded in (('flat', False), ('shaded', True)):
   assert.ok(three.anchor.heightMeters > 0 && three.anchor.feetPosition.every(Number.isFinite));
   assert.equal(classes.flat[0].handoff.rig.strategy.length > 0, true);
 
+  // Pieces of one figure touch, so they are one character: one group, one primary, one shared decision.
+  const groupIds = new Set(shadedScene.subjects.map(item => item.handoff.group.id));
+  assert.equal(groupIds.size, 1, 'the fragments of one figure share a group');
+  assert.equal(shadedScene.subjects.filter(item => item.handoff.group.primary).length, 1);
+  const lone = shadedScene.subjects.find(item => !item.handoff.group.primary);
+  if (lone) { applyCharacterChoice(shadedScene, lone.id, '2d'); assert.ok(shadedScene.subjects.every(item => item.handoff.choice.selected === '2d'), 'a choice on any piece applies to the whole figure'); applyCharacterChoice(shadedScene, lone.id, null); }
+
   // The person decides: a choice overrides the measured class, restores or drops the 2D rig, and keeps the package valid.
   const subject = shadedScene.subjects.find(item => item.dimensionality.class === 'volumetric-3d');
   assert.deepEqual(subject.handoff.choice, { options: ['2d', '3d'], suggested: '3d', selected: null, source: 'unset' });
