@@ -131,7 +131,7 @@ export function buildHandoffs(scene, choices = new Map()) {
     const unionPx = [Math.min(...members.map(m => m.boundsPx[0])), Math.min(...members.map(m => m.boundsPx[1])), Math.max(...members.map(m => m.boundsPx[2])), Math.max(...members.map(m => m.boundsPx[3]))];
     const unionArea = (unionPx[2] - unionPx[0]) * (unionPx[3] - unionPx[1]);
     const absorbed = scene.layers.filter(layer => {
-      if (memberLayerIds.has(layer.id) || ownedBySubjects.has(layer.id) || ['background', 'environment-region', 'static-support'].includes(layer.role) || !layer.sourceBoundsPx) return false;
+      if (memberLayerIds.has(layer.id) || ownedBySubjects.has(layer.id) || layer.role !== 'foreground-detail' || !layer.sourceBoundsPx) return false;   // never props, scenery or the backdrop
       const [x, y, w, h] = layer.sourceBoundsPx;
       return w * h <= unionArea * .6 && boundsGap([x, y, x + w, y + h], unionPx) <= 2;
     }).map(layer => layer.id);
