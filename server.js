@@ -1,6 +1,8 @@
 import { createServer } from 'node:http';
-import { readFile, stat } from 'node:fs/promises';
-import { extname, join, normalize, sep } from 'node:path';
+import { readFile, stat, mkdir } from 'node:fs/promises';
+import { createWriteStream } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
+import { extname, join, normalize, sep, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
@@ -13,13 +15,13 @@ const types = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=
 
 // Only the app itself and finished study artefacts are served; never the repo, sources or downloaded videos.
 const PUBLIC = [/^index\.html$/, /^viewer\.html$/, /^vendor\/three\/(build\/three\.(module|core)\.js|examples\/jsm\/(loaders\/SVGLoader|controls\/OrbitControls)\.js)$/, /^styles\.css$/, /^src\/[a-z0-9-]+\.js$/, /^examples\/[a-z0-9.-]+\.svg$/,
-  /^workspaces\/[a-z0-9-]+\/(motion-style-blueprint\.json|summary\.md|pack\/(pack\.json|style-guide\.md)|evidence\/[a-z0-9_-]+\.jpg|reconstruction\/(visual-reconstruction-blueprint\.json|scene\.aikiscene|(reconstruction|character)\.svg|reconstruction\.png|reference\.png|scene\.js))$/];
+  /^workspaces\/[a-z0-9-]+\/(motion-style-blueprint\.json|style\.aikistyle\.json|summary\.md|pack\/(pack\.json|style-guide\.md)|evidence\/[a-z0-9_-]+\.jpg|reconstruction\/(visual-reconstruction-blueprint\.json|scene\.aikiscene|(reconstruction|character)\.svg|reconstruction\.png|reference\.png|scene\.js))$/];
 
 // The API is for this page only: same-origin, JSON, and a Host we expect (blocks other websites and DNS rebinding).
 const allowedHosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
 const apiAllowed = request => allowedHosts.has(request.headers.host)
   && (!request.headers.origin || allowedHosts.has(new URL(request.headers.origin).host))
-  && (request.method !== 'POST' || /^application\/json\b/i.test(request.headers['content-type'] || ''));
+  && (request.method !== 'POST' || request.url.startsWith('/api/upload') || /^application\/json\b/i.test(request.headers['content-type'] || ''));
 
 const json = (response, status, body) => { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); response.end(JSON.stringify(body)); };
 async function readBody(request, limit = 20_000) {
@@ -30,6 +32,7 @@ async function readBody(request, limit = 20_000) {
 const studyUrls = (id, status) => status.state === 'done' ? {
   workspaceUrl: `/workspaces/${id}/`,
   evidenceUrl: status.result?.evidenceFrame ? `/workspaces/${id}/${status.result.evidenceFrame.image}` : null,
+  styleUrl: status.result?.styleFile === 'style.aikistyle.json' ? `/workspaces/${id}/style.aikistyle.json` : null,
   reconstructionUrl: status.result?.reconstruction?.available ? `/workspaces/${id}/reconstruction/reconstruction.svg` : null,
   reconstructionBlueprintUrl: status.result?.reconstruction?.available ? `/workspaces/${id}/reconstruction/visual-reconstruction-blueprint.json` : null,
   aikiSceneUrl: status.result?.reconstruction?.available ? `/workspaces/${id}/reconstruction/scene.aikiscene` : null,
@@ -44,6 +47,15 @@ async function api(request, response, url) {
     const studyId = `study-${randomBytes(4).toString('hex')}`;
     const started = await runCommand('style_analyze_channel', { source, videoCount: input.videoCount, reconstructionQuality: input.reconstructionQuality, name: input.name, background: true, outputDir: join(root, 'workspaces', studyId) });
     return json(response, 202, { studyId, ...started });
+  }
+  if (request.method === 'POST' && url.pathname === '/api/upload') {
+    const batch = url.searchParams.get('batch') || '';
+    const name = basename(url.searchParams.get('name') || '').replace(/[^\w.\- ]/g, '_');
+    if (!/^[a-f0-9]{8}$/.test(batch) || !/\.(mp4|mov|m4v|webm|mkv|avi)$/i.test(name)) return json(response, 400, { error: 'Drop video files (mp4, mov, m4v, webm, mkv, avi).' });
+    const dir = join(root, 'workspaces', '_uploads', batch);
+    await mkdir(dir, { recursive: true });
+    await pipeline(request, createWriteStream(join(dir, name)));
+    return json(response, 200, { folder: dir });
   }
   if (request.method === 'POST' && url.pathname === '/api/pick') {
     const { kind } = await readBody(request);

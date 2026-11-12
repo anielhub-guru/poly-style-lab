@@ -38,11 +38,33 @@ function finish(id, status) {
   $('#frame').hidden = !status.evidenceUrl; if (status.evidenceUrl) $('#frame').src = status.evidenceUrl;
   $('#done').textContent = `Analysed ${r.videosAnalysed ?? '?'} video(s)${r.skipped?.length ? ` · ${r.skipped.length} skipped` : ''}`;
   $('#facts').replaceChildren(...[...(r.headline || []).slice(0, 3), ...(r.warnings || []).slice(0, 1).map(w => `⚠ ${w}`)].map(t => Object.assign(document.createElement('li'), { textContent: t })));
+  const style = status.styleUrl;
+  $('#dlStyle').hidden = $('#styleSteps').hidden = !style;
+  if (style) $('#dlStyle').href = style;
   const scene = status.aikiSceneUrl;
-  $('#dlScene').hidden = $('#view3d').hidden = !scene;
+  $('#dlScene').hidden = $('#view3d').hidden = $('#sceneSteps').hidden = !scene;
   if (scene) { $('#dlScene').href = scene; $('#view3d').href = `/viewer.html?scene=${encodeURIComponent(scene)}`; }
-  else show('Analysis finished, but no .aikiscene could be built from these videos (no separable foreground). Summary is still available.', true);
+  else if (!style) show('Analysis finished. The summary is available.', false, 100);
   $('#dlSummary').href = `${status.workspaceUrl}summary.md`;
   $('#where').textContent = `Saved in aiki-style-lab/workspaces/${id}/`;
   $('#result').scrollIntoView({ behavior: 'smooth' });
 }
+
+// Drag & drop: browsers hide real file paths, so dropped videos are copied into a local upload folder and that folder is analysed.
+const drop = $('#drop');
+['dragenter', 'dragover'].forEach(t => window.addEventListener(t, e => { e.preventDefault(); drop.classList.add('over'); }));
+['dragleave', 'drop'].forEach(t => window.addEventListener(t, e => { e.preventDefault(); if (t === 'drop' || !e.relatedTarget) drop.classList.remove('over'); }));
+window.addEventListener('drop', async e => {
+  const files = [...e.dataTransfer.files].filter(f => /\.(mp4|mov|m4v|webm|mkv|avi)$/i.test(f.name));
+  if (!files.length) return show('No video files in that drop. Use mp4, mov, m4v, webm, mkv or avi.', true, 0);
+  const batch = [...crypto.getRandomValues(new Uint8Array(4))].map(b => b.toString(16).padStart(2, '0')).join('');
+  try {
+    let folder;
+    for (const [i, f] of files.entries()) {
+      show(`Copying ${i + 1} of ${files.length}: ${f.name}`, false, Math.round(i / files.length * 100));
+      const r = await fetch(`/api/upload?batch=${batch}&name=${encodeURIComponent(f.name)}`, { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: f });
+      const j = await r.json(); if (!r.ok) throw new Error(j.error); folder = j.folder;
+    }
+    $('#source').value = folder; show(`${files.length} video(s) ready. Press Start analysis.`, false, 0);
+  } catch (err) { show(err.message, true, 0); }
+});

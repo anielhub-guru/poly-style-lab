@@ -29,6 +29,8 @@
   .result h3 { margin:0 0 6px; color:var(--ok); } .result ul { margin:0 0 16px; padding-left:18px; color:var(--muted); font-size:14px; }
   .downloads { display:flex; gap:10px; flex-wrap:wrap; } a.button { text-decoration:none; display:inline-block; }
   .steps { color:var(--muted); font-size:14px; } .steps b { color:var(--text); }
+  .drop { border:2px dashed var(--line); border-radius:12px; padding:28px; text-align:center; color:var(--muted); margin-bottom:12px; transition:.15s; }
+  .drop.over { border-color:var(--accent); color:var(--text); background:#1f2330; }
   [hidden] { display:none !important; }
 </style>
 </head>
@@ -39,6 +41,7 @@
 
   <section class="card">
     <div class="step"><i>1</i>Choose your videos</div>
+    <div class="drop" id="drop">Drag &amp; drop videos here</div>
     <div class="row">
       <input type="text" id="source" placeholder="Pick a folder, or paste a path / YouTube link" autocomplete="off">
     </div>
@@ -68,11 +71,13 @@
     <h3 id="done"></h3>
     <ul id="facts"></ul>
     <div class="downloads">
-      <a class="button" id="dlScene" download="style.aikiscene"><button class="primary">Download .aikiscene</button></a>
+      <a class="button" id="dlStyle" download="style.aikistyle.json" hidden><button class="primary">Download Style</button></a>
+      <a class="button" id="dlScene" download="style.aikiscene"><button>Download .aikiscene</button></a>
       <a class="button" id="view3d" target="_blank" rel="noopener"><button>Preview in 3D</button></a>
       <a class="button" id="dlSummary" download="summary.md"><button>Summary</button></a>
     </div>
-    <p class="hint steps">In AikiStudio: open <b>Pose</b> or <b>Studio</b> → click <b>✦ Recreate</b> → choose the <b>.aikiscene</b> file.</p>
+    <p class="hint" id="styleSteps" hidden>Open your story in AikiStudio, then choose <b>Apply Style</b> and select the downloaded style file.</p>
+    <p class="hint steps" id="sceneSteps">In AikiStudio: open <b>Pose</b> or <b>Studio</b> → click <b>✦ Recreate</b> → choose the <b>.aikiscene</b> file.</p>
     <p class="hint" id="where"></p>
   </section>
 </main>
